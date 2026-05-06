@@ -5,6 +5,7 @@ import re
 import threading
 import time
 import traceback
+from html import escape as _hesc
 from typing import Any
 
 import requests
@@ -278,16 +279,22 @@ def _handle_callback(callback: dict[str, Any]) -> None:
             gsheet.append_movement({**mov, "final_category": cat, "final_subcategory": sub})
         except Exception as e:
             log.warning(f"gsheet.append_movement falló: {e}")
-        label = f"{cat}/{sub}" if sub else cat
+        label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
         if message_id:
             from .telegram_notify import _movement_card_text
-            telegram_notify.edit_message_text(chat_id, message_id, f"{_movement_card_text(mov)}\n\nAprobado: {label} ✓")
+            telegram_notify.edit_message_text(
+                chat_id, message_id,
+                f"{_movement_card_text(mov)}\n\n✅ <b>Aprobado:</b> {label}",
+            )
 
     elif action == "i":
         db.update_decision(mov_id, status="ignorado", final_category=None, final_subcategory=None, decided_by=chat_id)
         if message_id:
             from .telegram_notify import _movement_card_text
-            telegram_notify.edit_message_text(chat_id, message_id, f"{_movement_card_text(mov)}\n\nIgnorado ✓")
+            telegram_notify.edit_message_text(
+                chat_id, message_id,
+                f"{_movement_card_text(mov)}\n\n⚫ <b>Ignorado</b>",
+            )
 
     elif action == "c":
         db.set_wizard_state(chat_id, "correcting", {"mov_id": mov_id, "message_id": message_id})
@@ -296,7 +303,8 @@ def _handle_callback(callback: dict[str, Any]) -> None:
             telegram_notify.edit_message_text(
                 chat_id,
                 message_id,
-                f"{_movement_card_text(mov)}\n\nMándame la categoría (ej: Alimentacion o Alimentacion/Supermercado):",
+                f"{_movement_card_text(mov)}\n\n✏️ <b>Escribe la corrección</b>\n"
+                "Formato: <code>Categoria</code> o <code>Categoria/Subcategoria</code>",
             )
 
 
@@ -324,17 +332,20 @@ def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None
         except Exception as e:
             log.warning(f"gsheet.append_movement falló: {e}")
         pattern = _extract_pattern(mov.get("description", ""))
-        learned = ""
+        learned_html = ""
         if pattern:
             rule_id = db.add_rule(match_type="contains", pattern=pattern, category=cat, subcategory=sub)
             if rule_id:
-                learned = f"\nRegla aprendida: {pattern} → {cat}"
-        label = f"{cat}/{sub}" if sub else cat
+                learned_html = f"\n📚 Regla aprendida: <code>{_hesc(pattern)}</code> → {_hesc(cat)}"
+        label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
         if message_id:
             from .telegram_notify import _movement_card_text
-            telegram_notify.edit_message_text(chat_id, message_id, f"{_movement_card_text(mov)}\n\nCorregido: {label} ✓{learned}")
+            telegram_notify.edit_message_text(
+                chat_id, message_id,
+                f"{_movement_card_text(mov)}\n\n✏️ <b>Corregido:</b> {label}{learned_html}",
+            )
         else:
-            _send(f"Corregido: {label} ✓{learned}")
+            _send(f"Corregido: {label}{learned}")
         return
 
     if state_name.startswith("awaiting_rut_"):

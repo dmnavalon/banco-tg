@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import os
 import time
+from html import escape as _esc
 from typing import Sequence
 
 import requests
@@ -14,6 +14,183 @@ log = get_logger("telegram_notify")
 
 TG_API = "https://api.telegram.org"
 
+# ── Emojis por categoría ──────────────────────────────────────────────────────
+
+CATEGORY_EMOJIS: dict[str, str] = {
+    # Ingresos
+    "Sueldo":                       "💼",
+    "Honorarios":                   "🧾",
+    "Dividendos y utilidades":      "📈",
+    "Inversiones":                  "💹",
+    "Arriendos":                    "🏠",
+    "Reembolsos":                   "↩️",
+    "Otros ingresos":               "✨",
+    # Egresos
+    "Hogar y alimentación":         "🍽️",
+    "Vivienda":                     "🏡",
+    "Servicios básicos":            "💡",
+    "Educación":                    "🎓",
+    "Niños":                        "🧒",
+    "Salud y seguros":              "⚕️",
+    "Transporte":                   "🚗",
+    "Deporte y bienestar":          "🎾",
+    "Vestuario y cuidado personal": "👕",
+    "Entretención y vida social":   "🎉",
+    "Tecnología":                   "💻",
+    "Servicios domésticos":         "🧹",
+    "Mascotas":                     "🐾",
+    "Finanzas e impuestos":         "🏦",
+    "Ahorro e inversión":           "💰",
+    "Transferencias internas":      "🔁",
+    "Otros":                        "📦",
+}
+
+SUBCATEGORY_EMOJIS: dict[str, str] = {
+    # Hogar y alimentación
+    "Supermercado":                 "🛒",
+    "Alimentos":                    "🍲",
+    "Panadería":                    "🥖",
+    "Carnicería":                   "🥩",
+    "Verduras y frutas":            "🥬",
+    "Delivery":                     "🛵",
+    "Restaurantes":                 "🍽️",
+    "Cafeterías":                   "☕",
+    # Vivienda
+    "Arriendo o dividendo":         "🏠",
+    "Contribuciones":               "🏛️",
+    "Gastos comunes":               "🏢",
+    "Mantención casa":              "🔧",
+    "Jardín y piscina":             "🌿",
+    "Muebles y decoración":         "🛋️",
+    # Servicios básicos
+    "Luz":                          "💡",
+    "Agua":                         "💧",
+    "Gas":                          "🔥",
+    "Internet":                     "🌐",
+    "Telefonía móvil":              "📱",
+    "Streaming":                    "📺",
+    "Alarmas y seguridad":          "🚨",
+    # Educación
+    "Colegio":                      "🏫",
+    "Jardín infantil":              "🧸",
+    "Matrícula":                    "📝",
+    "Útiles escolares":             "✏️",
+    "Uniformes":                    "👔",
+    "Transporte escolar":           "🚌",
+    "Actividades escolares":        "🎒",
+    # Niños
+    "Actividades extracurriculares":"🎨",
+    "Juguetes":                     "🧸",
+    "Cumpleaños":                   "🎂",
+    "Ropa niños":                   "👕",
+    "Salud niños":                  "🩺",
+    "Deportes niños":               "⚽",
+    # Salud y seguros
+    "Farmacia":                     "💊",
+    "Consultas médicas":            "🩺",
+    "Dentista":                     "🦷",
+    "Exámenes médicos":             "🔬",
+    "Seguro de salud":              "🛡️",
+    "Seguro de vida":               "❤️",
+    "Terapias":                     "🧘",
+    # Transporte
+    "Combustible":                  "⛽",
+    "Tag y peajes":                 "🛣️",
+    "Estacionamientos":             "🅿️",
+    "Mantención auto":              "🔧",
+    "Seguro auto":                  "🚘",
+    "Permiso de circulación":       "📄",
+    "Uber o taxi":                  "🚕",
+    "Transporte público":           "🚌",
+    # Deporte y bienestar
+    "Gimnasio":                     "🏋️",
+    "Pádel":                        "🎾",
+    "Club deportivo":               "🏟️",
+    "Ropa deportiva":               "👟",
+    "Implementos deportivos":       "🎒",
+    "Masajes":                      "💆",
+    # Vestuario y cuidado personal
+    "Ropa adultos":                 "👔",
+    "Zapatos":                      "👞",
+    "Peluquería":                   "💇",
+    "Estética":                     "💅",
+    "Perfumería y cuidado personal":"🧴",
+    # Entretención y vida social
+    "Salidas familiares":           "👨‍👩‍👧‍👦",
+    "Cine y espectáculos":          "🎬",
+    "Regalos":                      "🎁",
+    "Cumpleaños y eventos":         "🎉",
+    "Vacaciones":                   "✈️",
+    # Tecnología
+    "Software y suscripciones":     "💻",
+    "Hardware":                     "🖥️",
+    "Celulares":                    "📱",
+    "Apps":                         "📲",
+    "Soporte técnico":              "🛠️",
+    # Servicios domésticos
+    "Nana":                         "🧑‍🍼",
+    "Imposiciones nana":            "📑",
+    "Aseo":                         "🧹",
+    "Reparaciones menores":         "🔨",
+    # Mascotas
+    "Alimento mascotas":            "🐶",
+    "Veterinario":                  "🐾",
+    "Accesorios mascotas":          "🦴",
+    # Finanzas e impuestos
+    "Pago tarjeta de crédito":      "💳",
+    "Intereses y comisiones":       "🏦",
+    "Impuestos":                    "🏛️",
+    "Contador":                     "🧮",
+    "Seguros financieros":          "🛡️",
+    # Ahorro e inversión
+    "Ahorro mensual":               "🐷",
+    "Inversión financiera":         "📈",
+    "Fondo emergencia":             "🚨",
+    "APV":                          "👴",
+    # Transferencias internas
+    "Movimiento entre cuentas":     "🔁",
+    "Pago tarjeta mismo titular":   "💳",
+    "Traspaso a inversión":         "💹",
+    # Ingresos (subcategorías)
+    "Sueldo principal":             "💼",
+    "Sueldo secundario":            "💼",
+    "Boletas de honorarios":        "🧾",
+    "Dividendos empresas":          "📈",
+    "Retiros de empresa":           "📤",
+    "Intereses":                    "💹",
+    "Dividendos financieros":       "💹",
+    "Venta de activos":             "🏷️",
+    "Ingreso por arriendo":         "🏠",
+    "Reembolso empresa":            "↩️",
+    "Devolución comercio":          "↩️",
+    "Seguro reembolsado":           "↩️",
+    "Regalos recibidos":            "🎁",
+    "Ingresos extraordinarios":     "✨",
+    # Otros
+    "Varios":                       "📦",
+    "Gastos no clasificados":       "❓",
+    "Ajustes manuales":             "⚙️",
+}
+
+_TIPO_HEADER: dict[str, str] = {
+    "Egreso":               "🔴 <b>Nuevo egreso detectado</b>",
+    "Ingreso":              "🟢 <b>Nuevo ingreso detectado</b>",
+    "Transferencia interna":"🔁 <b>Transferencia interna detectada</b>",
+}
+
+
+def _conf_band(conf: float) -> str:
+    pct = int(conf * 100)
+    if pct >= 90:
+        return f"🟢 {pct}%"
+    if pct >= 75:
+        return f"🟡 {pct}%"
+    if pct >= 50:
+        return f"🟠 {pct}%"
+    return f"🔴 {pct}% — revisar"
+
+
+# ── API helpers ───────────────────────────────────────────────────────────────
 
 def _bot_token() -> str:
     token = os.environ.get("TG_BOT_TOKEN", "").strip()
@@ -29,10 +206,12 @@ def _chat_id() -> str:
     return chat_id
 
 
-def send_message(text: str, *, chat_id: str | None = None, log_db: bool = True) -> dict | None:
+def send_message(text: str, *, chat_id: str | None = None, log_db: bool = True, parse_mode: str | None = None) -> dict | None:
     target = chat_id or _chat_id()
     url = f"{TG_API}/bot{_bot_token()}/sendMessage"
-    payload = {"chat_id": target, "text": text, "disable_web_page_preview": True}
+    payload: dict = {"chat_id": target, "text": text, "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
 
     delays = [0, 2, 5]
     for delay in delays:
@@ -72,48 +251,64 @@ def answer_callback_query(callback_query_id: str, text: str = "") -> None:
         pass
 
 
-def edit_message_text(chat_id: str, message_id: int, text: str) -> None:
+def edit_message_text(chat_id: str, message_id: int, text: str, parse_mode: str = "HTML") -> None:
     try:
+        payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         requests.post(
             f"{TG_API}/bot{_bot_token()}/editMessageText",
-            json={"chat_id": chat_id, "message_id": message_id, "text": text},
+            json=payload,
             timeout=10,
         )
     except Exception:
         pass
 
 
+# ── Card builder ──────────────────────────────────────────────────────────────
+
 def _movement_card_text(mov: dict) -> str:
-    bank = (mov.get("bank") or "").capitalize()
-    desc = mov.get("description") or ""
-    amount_str = format_clp(mov.get("amount") or 0)
-    comercio = mov.get("comercio") or "-"
+    bank = _esc((mov.get("bank") or "").capitalize())
+    desc = _esc(mov.get("description") or "")
+    amount = mov.get("amount") or 0
+    amount_str = _esc(format_clp(abs(amount)))
+    comercio = _esc(mov.get("comercio") or "-")
     cat = mov.get("suggested_category") or "Sin categoría"
     sub = mov.get("suggested_subcategory")
-    conf = int((mov.get("confidence") or 0) * 100)
-    tipo = mov.get("tipo") or "Egreso"
+    conf = mov.get("confidence") or 0.0
+    tipo = mov.get("tipo") or ("Ingreso" if amount > 0 else "Egreso")
     pregunta = mov.get("pregunta_sugerida")
-    propuesta = f"{cat} / {sub}" if sub else cat
+
+    cat_emoji = CATEGORY_EMOJIS.get(cat, "🏷️")
+    sub_emoji = SUBCATEGORY_EMOJIS.get(sub, "") if sub else ""
+    header = _TIPO_HEADER.get(tipo, f"🔴 <b>Nuevo movimiento</b>")
+
+    sub_str = f" → {sub_emoji} {_esc(sub)}" if sub else ""
 
     lines = [
-        f"Banco: {bank}",
-        f"Texto: {desc}",
-        f"Monto: {amount_str}",
-        f"Tipo: {tipo}",
-        f"Comercio: {comercio}",
-        f"Propuesta: {propuesta} ({conf}%)",
+        header,
+        "",
+        f"🏦 <b>Banco:</b> {bank}",
+        f"🏪 <b>Comercio:</b> {comercio}",
+        f"💸 <b>Monto:</b> {amount_str}",
+        "",
+        f"🏷️ <b>Categoría propuesta</b>",
+        f"{cat_emoji} {_esc(cat)}{sub_str}",
+        "",
+        f"📊 <b>Confianza:</b> {_conf_band(conf)}",
     ]
     if pregunta:
-        lines.append(f"Consulta: {pregunta}")
+        lines += ["", f"⚠️ <b>Consulta:</b> {_esc(pregunta)}"]
+
     return "\n".join(lines)
 
 
 def _movement_keyboard(mov_id: str) -> dict:
     return {
         "inline_keyboard": [[
-            {"text": "Aprobar", "callback_data": f"a:{mov_id}"},
-            {"text": "Corregir", "callback_data": f"c:{mov_id}"},
-            {"text": "Ignorar",  "callback_data": f"i:{mov_id}"},
+            {"text": "✅ Aprobar",  "callback_data": f"a:{mov_id}"},
+            {"text": "✏️ Corregir", "callback_data": f"c:{mov_id}"},
+            {"text": "🚫 Ignorar",  "callback_data": f"i:{mov_id}"},
         ]]
     }
 
@@ -140,6 +335,7 @@ def send_movement_cards(movements: Sequence[dict]) -> bool:
                 r = requests.post(url, json={
                     "chat_id": target,
                     "text": text,
+                    "parse_mode": "HTML",
                     "reply_markup": keyboard,
                     "disable_web_page_preview": True,
                 }, timeout=20)
