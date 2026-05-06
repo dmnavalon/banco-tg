@@ -70,6 +70,9 @@ def run_for_bank_full(bank: str, otp_provider: Callable[[str], str] | None = Non
             confidence=cls.confidence,
             classifier_source=cls.source,
             comercio=cls.comercio,
+            tipo=cls.tipo,
+            requiere_revision=cls.requiere_revision,
+            pregunta_sugerida=cls.pregunta_sugerida,
         )
         classified.append({
             **mov,
@@ -78,6 +81,9 @@ def run_for_bank_full(bank: str, otp_provider: Callable[[str], str] | None = Non
             "confidence": cls.confidence,
             "classifier_source": cls.source,
             "comercio": cls.comercio,
+            "tipo": cls.tipo,
+            "requiere_revision": cls.requiere_revision,
+            "pregunta_sugerida": cls.pregunta_sugerida,
         })
     return classified
 

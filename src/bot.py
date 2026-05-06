@@ -430,6 +430,9 @@ def _resend_pending() -> None:
                 "suggested_subcategory": r["suggested_subcategory"],
                 "confidence": r["confidence"] or 0.0,
                 "comercio": r.get("comercio"),
+                "tipo": r.get("tipo") or "Egreso",
+                "requiere_revision": r.get("requiere_revision", False),
+                "pregunta_sugerida": r.get("pregunta_sugerida"),
             })
         telegram_notify.send_daily_batch(movs)
     except Exception as e:

@@ -91,15 +91,21 @@ def _movement_card_text(mov: dict) -> str:
     cat = mov.get("suggested_category") or "Sin categoría"
     sub = mov.get("suggested_subcategory")
     conf = int((mov.get("confidence") or 0) * 100)
-    propuesta = f"{cat}/{sub}" if sub else cat
+    tipo = mov.get("tipo") or "Egreso"
+    pregunta = mov.get("pregunta_sugerida")
+    propuesta = f"{cat} / {sub}" if sub else cat
 
-    return (
-        f"Banco: {bank}\n"
-        f"Texto: {desc}\n"
-        f"Monto: {amount_str}\n"
-        f"Comercio: {comercio}\n"
-        f"Propuesta: {propuesta} ({conf}%)"
-    )
+    lines = [
+        f"Banco: {bank}",
+        f"Texto: {desc}",
+        f"Monto: {amount_str}",
+        f"Tipo: {tipo}",
+        f"Comercio: {comercio}",
+        f"Propuesta: {propuesta} ({conf}%)",
+    ]
+    if pregunta:
+        lines.append(f"Consulta: {pregunta}")
+    return "\n".join(lines)
 
 
 def _movement_keyboard(mov_id: str) -> dict:

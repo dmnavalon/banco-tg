@@ -51,6 +51,9 @@ def insert_movement(
     suggested_subcategory: str | None = None,
     confidence: float | None = None,
     classifier_source: str | None = None,
+    tipo: str | None = None,
+    requiere_revision: bool = False,
+    pregunta_sugerida: str | None = None,
 ) -> bool:
     ref = _db().collection("movements").document(mov_id)
     if ref.get().exists:
@@ -69,6 +72,9 @@ def insert_movement(
         "confidence": confidence,
         "classifier_source": classifier_source,
         "comercio": None,
+        "tipo": tipo or ("Ingreso" if (amount or 0) > 0 else "Egreso"),
+        "requiere_revision": requiere_revision,
+        "pregunta_sugerida": pregunta_sugerida,
         "status": "pendiente",
         "final_category": None,
         "final_subcategory": None,
@@ -88,6 +94,9 @@ def update_classification(
     confidence: float | None,
     classifier_source: str | None,
     comercio: str | None = None,
+    tipo: str | None = None,
+    requiere_revision: bool = False,
+    pregunta_sugerida: str | None = None,
 ) -> None:
     _db().collection("movements").document(mov_id).update({
         "suggested_category": suggested_category,
@@ -95,6 +104,9 @@ def update_classification(
         "confidence": confidence,
         "classifier_source": classifier_source,
         "comercio": comercio,
+        "tipo": tipo,
+        "requiere_revision": requiere_revision,
+        "pregunta_sugerida": pregunta_sugerida,
     })
 
 
