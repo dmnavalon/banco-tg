@@ -69,6 +69,7 @@ def run_for_bank_full(bank: str, otp_provider: Callable[[str], str] | None = Non
             suggested_subcategory=cls.subcategory,
             confidence=cls.confidence,
             classifier_source=cls.source,
+            comercio=cls.comercio,
         )
         classified.append({
             **mov,
@@ -76,6 +77,7 @@ def run_for_bank_full(bank: str, otp_provider: Callable[[str], str] | None = Non
             "suggested_subcategory": cls.subcategory,
             "confidence": cls.confidence,
             "classifier_source": cls.source,
+            "comercio": cls.comercio,
         })
     return classified
 

@@ -32,6 +32,7 @@ class Classification(NamedTuple):
     subcategory: str | None
     confidence: float
     source: str
+    comercio: str | None = None
 
 
 def classify(description: str, amount: float) -> Classification:
@@ -70,7 +71,8 @@ def _classify_with_haiku(description: str, amount: float) -> Classification:
         "Responde SOLO con JSON sin markdown:\n"
         '{"category":"<una de las válidas>",'
         '"subcategory":"<libre o null>",'
-        '"confidence":<0.0-1.0>}'
+        '"confidence":<0.0-1.0>,'
+        '"comercio":"<nombre legible del comercio, o null si es transferencia/genérico>"}'
     )
 
     try:
@@ -107,5 +109,7 @@ def _classify_with_haiku(description: str, amount: float) -> Classification:
     except (TypeError, ValueError):
         conf = 0.0
     conf = max(0.0, min(1.0, conf))
+    com_raw = parsed.get("comercio")
+    comercio = com_raw if (com_raw and str(com_raw).lower() != "null") else None
 
-    return Classification(cat, sub, conf, "haiku")
+    return Classification(cat, sub, conf, "haiku", comercio)

@@ -9,8 +9,8 @@ from typing import Any
 
 import requests
 
-from . import db, feedback, secrets_store, telegram_notify
-from .utils import format_clp, get_logger
+from . import db, feedback, gsheet, secrets_store, telegram_notify
+from .utils import format_clp, get_logger, project_path
 
 log = get_logger("bot")
 
@@ -69,7 +69,7 @@ def _get_updates(offset: int, timeout: int = 25) -> list[dict[str, Any]]:
     try:
         r = requests.get(
             url,
-            params={"offset": offset, "timeout": timeout, "allowed_updates": ["message"]},
+            params={"offset": offset, "timeout": timeout, "allowed_updates": ["message", "callback_query"]},
             timeout=timeout + 10,
         )
         if r.status_code != 200:
@@ -244,10 +244,98 @@ def _handle_command(text: str, chat_id: str) -> None:
     _send(f"Comando no reconocido: {cmd}. /help")
 
 
+def _handle_callback(callback: dict[str, Any]) -> None:
+    callback_id = callback.get("id", "")
+    chat = (callback.get("message") or {}).get("chat") or {}
+    chat_id = str(chat.get("id", ""))
+    message_id = (callback.get("message") or {}).get("message_id")
+    data = (callback.get("data") or "").strip()
+
+    authorized = _authorized_chat_id()
+    if chat_id != authorized:
+        telegram_notify.answer_callback_query(callback_id)
+        return
+
+    telegram_notify.answer_callback_query(callback_id)
+
+    if not data or ":" not in data:
+        return
+
+    action, mov_id = data.split(":", 1)
+    movs = db.get_movements_by_ids([mov_id])
+    if not movs:
+        if message_id:
+            telegram_notify.edit_message_text(chat_id, message_id, "[Movimiento no encontrado]")
+        return
+
+    mov = movs[0]
+
+    if action == "a":
+        cat = mov.get("suggested_category") or "Otro"
+        sub = mov.get("suggested_subcategory")
+        db.update_decision(mov_id, status="aprobado", final_category=cat, final_subcategory=sub, decided_by=chat_id)
+        try:
+            gsheet.append_movement({**mov, "final_category": cat, "final_subcategory": sub})
+        except Exception as e:
+            log.warning(f"gsheet.append_movement falló: {e}")
+        label = f"{cat}/{sub}" if sub else cat
+        if message_id:
+            from .telegram_notify import _movement_card_text
+            telegram_notify.edit_message_text(chat_id, message_id, f"{_movement_card_text(mov)}\n\nAprobado: {label} ✓")
+
+    elif action == "i":
+        db.update_decision(mov_id, status="ignorado", final_category=None, final_subcategory=None, decided_by=chat_id)
+        if message_id:
+            from .telegram_notify import _movement_card_text
+            telegram_notify.edit_message_text(chat_id, message_id, f"{_movement_card_text(mov)}\n\nIgnorado ✓")
+
+    elif action == "c":
+        db.set_wizard_state(chat_id, "correcting", {"mov_id": mov_id, "message_id": message_id})
+        if message_id:
+            from .telegram_notify import _movement_card_text
+            telegram_notify.edit_message_text(
+                chat_id,
+                message_id,
+                f"{_movement_card_text(mov)}\n\nMándame la categoría (ej: Alimentacion o Alimentacion/Supermercado):",
+            )
+
+
 def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None:
     state_name = state["state"]
     payload = state["payload"] or {}
     bank = payload.get("bank")
+
+    if state_name == "correcting":
+        mov_id = payload.get("mov_id", "")
+        message_id = payload.get("message_id")
+        db.clear_wizard_state(chat_id)
+        if not mov_id:
+            _send("Error interno: mov_id no encontrado. Reintenta.")
+            return
+        movs = db.get_movements_by_ids([mov_id])
+        if not movs:
+            _send("Movimiento no encontrado en la base.")
+            return
+        mov = movs[0]
+        cat, sub = _split_cat_sub(text)
+        db.update_decision(mov_id, status="corregido", final_category=cat, final_subcategory=sub, decided_by=chat_id)
+        try:
+            gsheet.append_movement({**mov, "final_category": cat, "final_subcategory": sub})
+        except Exception as e:
+            log.warning(f"gsheet.append_movement falló: {e}")
+        pattern = _extract_pattern(mov.get("description", ""))
+        learned = ""
+        if pattern:
+            rule_id = db.add_rule(match_type="contains", pattern=pattern, category=cat, subcategory=sub)
+            if rule_id:
+                learned = f"\nRegla aprendida: {pattern} → {cat}"
+        label = f"{cat}/{sub}" if sub else cat
+        if message_id:
+            from .telegram_notify import _movement_card_text
+            telegram_notify.edit_message_text(chat_id, message_id, f"{_movement_card_text(mov)}\n\nCorregido: {label} ✓{learned}")
+        else:
+            _send(f"Corregido: {label} ✓{learned}")
+        return
 
     if state_name.startswith("awaiting_rut_"):
         if not re.fullmatch(r"\d{7,8}-[\dkK]", text):
@@ -280,6 +368,24 @@ def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None
 
     db.clear_wizard_state(chat_id)
     _send("Estado de wizard inválido, reseteado. Reintenta /cred <banco>.")
+
+
+def _split_cat_sub(s: str) -> tuple[str, str | None]:
+    parts = [p.strip() for p in s.split("/", 1)]
+    cat = parts[0].capitalize() if parts[0] else "Otro"
+    sub = parts[1].capitalize() if len(parts) > 1 and parts[1] else None
+    return cat, sub
+
+
+def _extract_pattern(description: str) -> str | None:
+    from .utils import normalize
+    norm = normalize(description)
+    if not norm:
+        return None
+    for token in re.split(r"[^A-Z]+", norm):
+        if len(token) >= 4:
+            return token
+    return None
 
 
 def _run_test_in_thread(bank: str) -> None:
@@ -323,6 +429,7 @@ def _resend_pending() -> None:
                 "suggested_category": r["suggested_category"],
                 "suggested_subcategory": r["suggested_subcategory"],
                 "confidence": r["confidence"] or 0.0,
+                "comercio": r.get("comercio"),
             })
         telegram_notify.send_daily_batch(movs)
     except Exception as e:
@@ -348,6 +455,13 @@ def main() -> None:
                     except Exception as e:
                         db.record_error("bot.handle_message", str(e), traceback.format_exc())
                         log.error(f"Error procesando update {update_id}: {e}")
+                cbq = u.get("callback_query")
+                if cbq:
+                    try:
+                        _handle_callback(cbq)
+                    except Exception as e:
+                        db.record_error("bot.handle_callback", str(e), traceback.format_exc())
+                        log.error(f"Error procesando callback {update_id}: {e}")
         except Exception as e:
             log.error(f"Loop crash: {type(e).__name__}: {e}")
             time.sleep(5)

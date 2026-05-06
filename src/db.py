@@ -68,6 +68,7 @@ def insert_movement(
         "suggested_subcategory": suggested_subcategory,
         "confidence": confidence,
         "classifier_source": classifier_source,
+        "comercio": None,
         "status": "pendiente",
         "final_category": None,
         "final_subcategory": None,
@@ -86,12 +87,14 @@ def update_classification(
     suggested_subcategory: str | None,
     confidence: float | None,
     classifier_source: str | None,
+    comercio: str | None = None,
 ) -> None:
     _db().collection("movements").document(mov_id).update({
         "suggested_category": suggested_category,
         "suggested_subcategory": suggested_subcategory,
         "confidence": confidence,
         "classifier_source": classifier_source,
+        "comercio": comercio,
     })
 
 
@@ -357,6 +360,15 @@ def count_rules() -> int:
 
 
 # ── config ─────────────────────────────────────────────────────────────────
+
+def get_batch_ids() -> list[str]:
+    val = get_config("last_batch_ids")
+    return json.loads(val) if val else []
+
+
+def set_batch_ids(ids: list[str]) -> None:
+    set_config("last_batch_ids", json.dumps(ids))
+
 
 def get_config(key: str) -> str | None:
     snap = _db().collection("config").document(key).get()
