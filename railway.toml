@@ -1,0 +1,6 @@
+[build]
+dockerfile = "Dockerfile"
+
+[deploy]
+startCommand = "python -m src.bot"
+restartPolicyType = "always"

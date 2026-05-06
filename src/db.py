@@ -1,0 +1,367 @@
+from __future__ import annotations
+
+import json
+import os
+from datetime import datetime
+from typing import Any
+
+import firebase_admin
+from firebase_admin import credentials, firestore as fstore
+
+_client: Any = None
+
+
+def _db():
+    global _client
+    if _client is None:
+        key_json = os.environ.get("FIREBASE_KEY_JSON", "").strip()
+        if key_json:
+            cred = credentials.Certificate(json.loads(key_json))
+        else:
+            from .utils import project_path
+            path = project_path("data", "firebase_service_account.json")
+            cred = credentials.Certificate(str(path))
+        if not firebase_admin._apps:
+            firebase_admin.initialize_app(cred)
+        _client = fstore.client()
+    return _client
+
+
+def init_if_needed() -> None:
+    _db()
+
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ── movements ──────────────────────────────────────────────────────────────
+
+def insert_movement(
+    *,
+    mov_id: str,
+    date_iso: str,
+    description: str,
+    amount: float,
+    movement_type: str | None,
+    account: str | None,
+    bank: str,
+    raw_blob: str | None,
+    suggested_category: str | None = None,
+    suggested_subcategory: str | None = None,
+    confidence: float | None = None,
+    classifier_source: str | None = None,
+) -> bool:
+    ref = _db().collection("movements").document(mov_id)
+    if ref.get().exists:
+        return False
+    ref.set({
+        "id": mov_id,
+        "date": date_iso,
+        "description": description,
+        "amount": amount,
+        "movement_type": movement_type,
+        "account": account,
+        "bank": bank,
+        "raw_blob": raw_blob,
+        "suggested_category": suggested_category,
+        "suggested_subcategory": suggested_subcategory,
+        "confidence": confidence,
+        "classifier_source": classifier_source,
+        "status": "pendiente",
+        "final_category": None,
+        "final_subcategory": None,
+        "decided_by": None,
+        "decided_at": None,
+        "notified_at": None,
+        "inserted_at": _now(),
+    })
+    return True
+
+
+def update_classification(
+    mov_id: str,
+    *,
+    suggested_category: str | None,
+    suggested_subcategory: str | None,
+    confidence: float | None,
+    classifier_source: str | None,
+) -> None:
+    _db().collection("movements").document(mov_id).update({
+        "suggested_category": suggested_category,
+        "suggested_subcategory": suggested_subcategory,
+        "confidence": confidence,
+        "classifier_source": classifier_source,
+    })
+
+
+def mark_notified(ids: list[str]) -> None:
+    if not ids:
+        return
+    now = _now()
+    db = _db()
+    batch = db.batch()
+    for mid in ids:
+        batch.update(db.collection("movements").document(mid), {"notified_at": now})
+    batch.commit()
+
+
+def get_pending() -> list[dict]:
+    docs = _db().collection("movements").where("status", "==", "pendiente").get()
+    rows = [d.to_dict() for d in docs if not d.to_dict().get("notified_at")]
+    rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
+    return rows
+
+
+def get_movements_by_ids(ids: list[str]) -> list[dict]:
+    if not ids:
+        return []
+    db = _db()
+    result: dict[str, dict] = {}
+    for mid in ids:
+        snap = db.collection("movements").document(mid).get()
+        if snap.exists:
+            result[mid] = snap.to_dict()
+    return [result[i] for i in ids if i in result]
+
+
+def update_decision(
+    mov_id: str,
+    *,
+    status: str,
+    final_category: str | None,
+    final_subcategory: str | None,
+    decided_by: str,
+) -> None:
+    _db().collection("movements").document(mov_id).update({
+        "status": status,
+        "final_category": final_category,
+        "final_subcategory": final_subcategory,
+        "decided_by": decided_by,
+        "decided_at": _now(),
+    })
+
+
+def get_last_movements(limit: int = 10) -> list[dict]:
+    limit = max(1, min(limit, 50))
+    docs = (
+        _db().collection("movements")
+        .order_by("date", direction=fstore.Query.DESCENDING)
+        .limit(limit)
+        .get()
+    )
+    return [d.to_dict() for d in docs]
+
+
+def count_pending() -> int:
+    return len(_db().collection("movements").where("status", "==", "pendiente").get())
+
+
+def count_total() -> int:
+    return len(list(_db().collection("movements").get()))
+
+
+# ── telegram_log ───────────────────────────────────────────────────────────
+
+def record_telegram_log(
+    *,
+    direction: str,
+    chat_id: str | None,
+    message_id: str | None,
+    text: str | None,
+    payload: str | None = None,
+) -> str:
+    db = _db()
+    ref = db.collection("telegram_log").document()
+    ref.set({
+        "direction": direction,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "payload": payload,
+        "created_at": _now(),
+    })
+    if payload:
+        db.collection("config").document("last_batch_payload").set(
+            {"value": payload, "updated_at": _now()}
+        )
+    return ref.id
+
+
+def get_last_batch_payload() -> str | None:
+    return get_config("last_batch_payload")
+
+
+def get_latest_otp(after: str) -> str | None:
+    # Filtra solo por rango en created_at (evita índice compuesto).
+    # Filtra direction e inicio de texto en Python.
+    docs = (
+        _db().collection("telegram_log")
+        .where("created_at", ">", after)
+        .order_by("created_at", direction=fstore.Query.DESCENDING)
+        .limit(50)
+        .get()
+    )
+    for doc in docs:
+        d = doc.to_dict()
+        if d.get("direction") == "in" and (d.get("text") or "").lower().startswith("otp "):
+            return d["text"]
+    return None
+
+
+# ── errors ─────────────────────────────────────────────────────────────────
+
+def record_error(component: str, message: str, traceback: str | None = None) -> None:
+    _db().collection("errors").document().set({
+        "component": component,
+        "message": message,
+        "traceback": traceback,
+        "created_at": _now(),
+    })
+
+
+def get_last_error() -> dict | None:
+    docs = (
+        _db().collection("errors")
+        .order_by("created_at", direction=fstore.Query.DESCENDING)
+        .limit(1)
+        .get()
+    )
+    return docs[0].to_dict() if docs else None
+
+
+# ── credentials (usadas por secrets_store.py) ──────────────────────────────
+
+def get_credential_blob(bank: str) -> str | None:
+    snap = _db().collection("credentials").document(bank.lower()).get()
+    return snap.to_dict().get("blob") if snap.exists else None
+
+
+def set_credential_blob(bank: str, blob_b64: str) -> None:
+    _db().collection("credentials").document(bank.lower()).set({
+        "bank": bank.lower(),
+        "blob": blob_b64,
+        "updated_at": _now(),
+    })
+
+
+def delete_credential(bank: str) -> bool:
+    ref = _db().collection("credentials").document(bank.lower())
+    if not ref.get().exists:
+        return False
+    ref.delete()
+    return True
+
+
+def list_credentials() -> list[str]:
+    return sorted(d.id for d in _db().collection("credentials").get())
+
+
+# ── wizard_state ───────────────────────────────────────────────────────────
+
+def get_wizard_state(chat_id: str) -> dict[str, Any] | None:
+    snap = _db().collection("wizard_state").document(chat_id).get()
+    if not snap.exists:
+        return None
+    d = snap.to_dict()
+    payload: dict[str, Any] = {}
+    if d.get("payload"):
+        try:
+            payload = json.loads(d["payload"])
+        except json.JSONDecodeError:
+            pass
+    return {"state": d["state"], "payload": payload}
+
+
+def set_wizard_state(chat_id: str, state: str, payload: dict[str, Any] | None = None) -> None:
+    _db().collection("wizard_state").document(chat_id).set({
+        "state": state,
+        "payload": json.dumps(payload or {}, ensure_ascii=False),
+        "updated_at": _now(),
+    })
+
+
+def clear_wizard_state(chat_id: str) -> None:
+    _db().collection("wizard_state").document(chat_id).delete()
+
+
+# ── rules ──────────────────────────────────────────────────────────────────
+
+def find_rule_for(description: str) -> dict | None:
+    from .utils import normalize
+    norm_desc = normalize(description)
+    if not norm_desc:
+        return None
+    db = _db()
+
+    # Exact match: dos filtros de igualdad no necesitan índice compuesto
+    docs = (
+        db.collection("rules")
+        .where("match_type", "==", "exact")
+        .where("pattern", "==", norm_desc)
+        .limit(1)
+        .get()
+    )
+    if docs:
+        d = docs[0].to_dict()
+        d["id"] = docs[0].id
+        return d
+
+    # Contains match: traemos todas y filtramos en Python
+    docs = db.collection("rules").where("match_type", "==", "contains").get()
+    best: dict | None = None
+    for doc in docs:
+        rule = doc.to_dict()
+        rule["id"] = doc.id
+        if rule.get("pattern") and rule["pattern"] in norm_desc:
+            if best is None or rule.get("hits", 0) > best.get("hits", 0):
+                best = rule
+    return best
+
+
+def bump_rule_hit(rule_id: str) -> None:
+    from google.cloud.firestore_v1 import transforms
+    _db().collection("rules").document(rule_id).update({
+        "hits": transforms.Increment(1),
+        "last_used_at": _now(),
+    })
+
+
+def add_rule(*, match_type: str, pattern: str, category: str, subcategory: str | None) -> str | None:
+    db = _db()
+    existing = (
+        db.collection("rules")
+        .where("match_type", "==", match_type)
+        .where("pattern", "==", pattern)
+        .where("category", "==", category)
+        .limit(1)
+        .get()
+    )
+    if existing:
+        return None
+    ref = db.collection("rules").document()
+    ref.set({
+        "match_type": match_type,
+        "pattern": pattern,
+        "category": category,
+        "subcategory": subcategory,
+        "hits": 0,
+        "created_at": _now(),
+        "last_used_at": None,
+    })
+    return ref.id
+
+
+def count_rules() -> int:
+    return len(list(_db().collection("rules").get()))
+
+
+# ── config ─────────────────────────────────────────────────────────────────
+
+def get_config(key: str) -> str | None:
+    snap = _db().collection("config").document(key).get()
+    return snap.to_dict().get("value") if snap.exists else None
+
+
+def set_config(key: str, value: str) -> None:
+    _db().collection("config").document(key).set({"value": value, "updated_at": _now()})
