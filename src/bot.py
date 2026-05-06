@@ -19,6 +19,11 @@ TG_API = "https://api.telegram.org"
 
 VALID_BANKS = ["falabella", "bancochile"]
 
+_GREET_RE = re.compile(
+    r"^(hola+|hi|hey|ey+|buenas?(\s+(d[ií]as?|tardes?|noches?))?|buenos\s+d[ií]as?|saludos?|qu[eé]\s+tal|ola)[\s!.,😊👋]*$",
+    re.IGNORECASE,
+)
+
 HELP_TEXT = (
     "Comandos:\n"
     "/start, /help — esta ayuda\n"
@@ -121,6 +126,10 @@ def _handle_message(msg: dict[str, Any]) -> None:
     state = db.get_wizard_state(chat_id)
     if state:
         _handle_wizard_input(text, chat_id, state)
+        return
+
+    if _GREET_RE.match(text):
+        threading.Thread(target=_handle_greeting, daemon=True).start()
         return
 
     response = feedback.apply(text, chat_id)
@@ -379,6 +388,44 @@ def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None
 
     db.clear_wizard_state(chat_id)
     _send("Estado de wizard inválido, reseteado. Reintenta /cred <banco>.")
+
+
+def _handle_greeting() -> None:
+    try:
+        rows = db.get_all_pending()
+        if not rows:
+            _send(
+                "👋 Hola, Diego.\n\n"
+                "✅ Todo al día por ahora.\n"
+                "No tengo movimientos nuevos pendientes de revisión.\n\n"
+                "Si quieres revisar pendientes anteriores, escribe /pending."
+            )
+            return
+
+        n = len(rows)
+        plural = "s" if n != 1 else ""
+        _send(f"👋 Hola, Diego.\n\nTienes {n} movimiento{plural} pendiente{plural} de revisión:")
+        movs = [
+            {
+                "id": r["id"],
+                "date": r.get("date", ""),
+                "description": r.get("description", ""),
+                "amount": r.get("amount", 0),
+                "bank": r.get("bank", ""),
+                "suggested_category": r.get("suggested_category"),
+                "suggested_subcategory": r.get("suggested_subcategory"),
+                "confidence": r.get("confidence") or 0.0,
+                "comercio": r.get("comercio"),
+                "tipo": r.get("tipo") or "Egreso",
+                "requiere_revision": r.get("requiere_revision", False),
+                "pregunta_sugerida": r.get("pregunta_sugerida"),
+            }
+            for r in rows
+        ]
+        telegram_notify.send_movement_cards(movs)
+    except Exception as e:
+        db.record_error("bot.greeting", str(e), traceback.format_exc())
+        _send(f"Error al consultar pendientes: {type(e).__name__}: {e}")
 
 
 def _split_cat_sub(s: str) -> tuple[str, str | None]:

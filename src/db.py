@@ -122,8 +122,17 @@ def mark_notified(ids: list[str]) -> None:
 
 
 def get_pending() -> list[dict]:
+    """Movimientos pendientes aún no notificados (para el cron diario)."""
     docs = _db().collection("movements").where("status", "==", "pendiente").get()
     rows = [d.to_dict() for d in docs if not d.to_dict().get("notified_at")]
+    rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
+    return rows
+
+
+def get_all_pending() -> list[dict]:
+    """Todos los movimientos con status=pendiente, hayan sido notificados o no."""
+    docs = _db().collection("movements").where("status", "==", "pendiente").get()
+    rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
     return rows
 
