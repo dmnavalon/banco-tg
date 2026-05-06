@@ -134,10 +134,15 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
 def fetch_movements(page: Page) -> list[dict]:
     log.info("Navegando directo a saldos-movimientos de Banco de Chile…")
     page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
-    page.wait_for_timeout(4000)
 
-    # TODO v2: si la tabla DOM rompe en producción, migrar a descarga de
-    # cartola con `a:has-text("Descargar cartola")` + parseo del archivo.
+    # Espera activa: hasta 40s a que aparezca alguna tabla (SPA carga async)
+    table_sel = ", ".join(SEL_TABLE)
+    try:
+        page.wait_for_selector(table_sel, state="attached", timeout=40000)
+        page.wait_for_timeout(2000)  # deja que las filas se pueblen
+    except PWTimeout:
+        raise ScraperBroken("No encontré tabla de movimientos en Banco de Chile.")
+
     table = read_table_rows(page, SEL_TABLE)
     if not table:
         raise ScraperBroken("No encontré tabla de movimientos en Banco de Chile.")
