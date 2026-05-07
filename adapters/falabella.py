@@ -48,18 +48,28 @@ SEL_BTN_ESTADO = [
     'button.btn-grey:has-text("Estado de cuenta")',
 ]
 
+# Selectores SIEMPRE contextualizados a un overlay explícito — evita matchear
+# "Cerrar sesión" del header u otros botones de cierre fuera de modales.
 SEL_POPUP_CLOSE = [
-    'button[aria-label*="cerrar" i]',
-    'button[aria-label*="close" i]',
-    'button[title*="cerrar" i]',
-    'button[title*="close" i]',
+    '[role="dialog"] button[aria-label*="cerrar" i]',
+    '[role="dialog"] button[aria-label*="close" i]',
+    '[class*="modal"] button[aria-label*="cerrar" i]',
+    '[class*="modal"] button[aria-label*="close" i]',
+    '[class*="popup"] button[aria-label*="cerrar" i]',
+    '[class*="popup"] button[aria-label*="close" i]',
+    '[class*="overlay"] button[aria-label*="cerrar" i]',
+    '[class*="overlay"] button[aria-label*="close" i]',
+    '[role="dialog"] button[title*="cerrar" i]',
+    '[class*="modal"] button[title*="cerrar" i]',
     '[class*="modal"] button[class*="close"]',
     '[class*="popup"] button[class*="close"]',
     '[class*="overlay"] [class*="close"]',
     'button.modal-close',
     '.modal-header .close',
-    'button:has-text("×")',
-    'button:has-text("✕")',
+    '[role="dialog"] button:has-text("×")',
+    '[role="dialog"] button:has-text("✕")',
+    '[class*="modal"] button:has-text("×")',
+    '[class*="modal"] button:has-text("✕")',
 ]
 SEL_TAB_MOVS = [
     'label[for="last-movements"]',
@@ -171,44 +181,50 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
 
 
 def _dismiss_popups(page: Page) -> None:
-    """Cierra popups/overlays publicitarios de alta z-index."""
-    # 1. Botones de cierre conocidos
-    for sel in SEL_POPUP_CLOSE:
-        try:
-            loc = page.locator(sel).first
-            if loc.is_visible(timeout=800):
-                loc.click(timeout=2000)
-                log.info(f"Popup cerrado con: {sel}")
-                page.wait_for_timeout(600)
-                break
-        except Exception:
-            continue
+    """Cierra popups/overlays publicitarios de alta z-index. Itera hasta 3 veces."""
+    for attempt in range(3):
+        closed_any = False
 
-    # 2. Escape
-    page.keyboard.press("Escape")
-    page.wait_for_timeout(400)
+        # 1. Botones de cierre conocidos — sin break para cerrar múltiples popups
+        for sel in SEL_POPUP_CLOSE:
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=600):
+                    loc.click(timeout=2000)
+                    log.info(f"Popup cerrado con: {sel}")
+                    page.wait_for_timeout(500)
+                    closed_any = True
+            except Exception:
+                continue
 
-    # 3. JS: ocultar overlays grandes de z-index alto que tapen el centro
-    removed = page.evaluate("""
-        () => {
-            let count = 0;
-            const cx = window.innerWidth / 2;
-            const cy = window.innerHeight / 2;
-            document.elementsFromPoint(cx, cy).forEach(el => {
-                if (el.tagName === 'BODY' || el.tagName === 'HTML') return;
-                const z = parseInt(window.getComputedStyle(el).zIndex, 10);
-                const r = el.getBoundingClientRect();
-                if (z > 100 && r.width * r.height > window.innerWidth * window.innerHeight * 0.25) {
-                    el.style.display = 'none';
-                    count++;
-                }
-            });
-            return count;
-        }
-    """)
-    if removed:
-        log.info(f"Overlays ocultados via JS: {removed}")
-        page.wait_for_timeout(400)
+        # 2. Escape
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+
+        # 3. JS: ocultar todos los overlays de z-index alto (no solo los del centro)
+        removed = page.evaluate("""
+            () => {
+                let count = 0;
+                const area = window.innerWidth * window.innerHeight;
+                document.querySelectorAll('*').forEach(el => {
+                    if (el.tagName === 'BODY' || el.tagName === 'HTML') return;
+                    const z = parseInt(window.getComputedStyle(el).zIndex, 10);
+                    const r = el.getBoundingClientRect();
+                    if (z > 100 && r.width * r.height > area * 0.15) {
+                        el.style.display = 'none';
+                        count++;
+                    }
+                });
+                return count;
+            }
+        """)
+        if removed:
+            log.info(f"Overlays ocultados via JS (intento {attempt+1}): {removed}")
+            page.wait_for_timeout(400)
+
+        # Si no hubo popups en este intento, salir del loop
+        if not closed_any and not removed:
+            break
 
 
 def _read_movements_tables(page: Page) -> dict | None:
@@ -237,7 +253,24 @@ def fetch_movements(page: Page) -> list[dict]:
     log.info("Esperando dashboard Falabella…")
     page.wait_for_timeout(5000)
 
+    url_before = page.url
     _dismiss_popups(page)
+    if not DASHBOARD_PATTERN.search(page.url):
+        raise ScraperBroken(
+            f"Cerrar popups nos sacó del dashboard. URL antes: {url_before} → después: {page.url}. "
+            f"Probable que un selector de SEL_POPUP_CLOSE haya clickeado un botón legítimo (ej. 'Cerrar sesión')."
+        )
+
+    log.info(f"Buscando botón Estado de cuenta. URL actual: {page.url}")
+    # Diagnóstico: listar botones visibles en el DOM para depuración
+    btns = page.evaluate("""
+        () => Array.from(document.querySelectorAll('button, a[role="button"]'))
+              .filter(b => b.offsetParent !== null)
+              .map(b => b.textContent.trim().slice(0, 40))
+              .filter(t => t.length > 0)
+              .slice(0, 15)
+    """)
+    log.info(f"Botones visibles en la página: {btns}")
 
     if not click_first(page, SEL_BTN_ESTADO, timeout_ms=15000):
         raise ScraperBroken("No encontré el botón Estado de cuenta en Falabella.")

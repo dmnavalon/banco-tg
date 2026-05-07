@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
         libgbm1 libpango-1.0-0 libcairo2 \
         libx11-6 libx11-xcb1 libxcb1 libxext6 \
+    && (apt-get install -y --no-install-recommends libasound2 || apt-get install -y --no-install-recommends libasound2t64) \
     && rm -rf /var/lib/apt/lists/*
 RUN playwright install chromium
 

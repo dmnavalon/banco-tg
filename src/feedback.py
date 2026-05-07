@@ -68,8 +68,8 @@ def apply(text: str, chat_id: str) -> str:
             final_subcategory=sub,
             decided_by=chat_id,
         )
-        gsheet.append_movement({**mov, "final_category": cat, "final_subcategory": sub})
-        return f"OK #{idx}: {cat}{('/' + sub) if sub else ''} ✓"
+        gsheet_warn = _try_append({**mov, "final_category": cat, "final_subcategory": sub})
+        return f"OK #{idx}: {cat}{('/' + sub) if sub else ''} ✓{gsheet_warn}"
 
     if rest_lower in {"ignorar", "ignora", "skip"}:
         db.update_decision(
@@ -89,7 +89,7 @@ def apply(text: str, chat_id: str) -> str:
         final_subcategory=sub,
         decided_by=chat_id,
     )
-    gsheet.append_movement({**mov, "final_category": cat, "final_subcategory": sub})
+    gsheet_warn = _try_append({**mov, "final_category": cat, "final_subcategory": sub})
     pattern = _extract_pattern(mov["description"])
     learned = ""
     if pattern:
@@ -101,12 +101,13 @@ def apply(text: str, chat_id: str) -> str:
         )
         if rule_id:
             learned = f" (regla aprendida: {pattern} → {cat})"
-    return f"Corregido #{idx}: {cat}{('/' + sub) if sub else ''} ✓{learned}"
+    return f"Corregido #{idx}: {cat}{('/' + sub) if sub else ''} ✓{learned}{gsheet_warn}"
 
 
 def _approve_all(ids: list[str], chat_id: str) -> str:
     movs = db.get_movements_by_ids(ids)
     count = 0
+    sheet_failures = 0
     for mov in movs:
         if mov["status"] != "pendiente":
             continue
@@ -119,9 +120,23 @@ def _approve_all(ids: list[str], chat_id: str) -> str:
             final_subcategory=sub,
             decided_by=chat_id,
         )
-        gsheet.append_movement({**mov, "final_category": cat, "final_subcategory": sub})
+        if _try_append({**mov, "final_category": cat, "final_subcategory": sub}):
+            sheet_failures += 1
         count += 1
-    return f"Aprobados {count} movimientos del último batch ✓"
+    msg = f"Aprobados {count} movimientos del último batch ✓"
+    if sheet_failures:
+        msg += f"\n⚠️ {sheet_failures} no llegaron al GSheet (ver logs)."
+    return msg
+
+
+def _try_append(mov: dict) -> str:
+    """Empuja el movimiento al GSheet. Si falla, loguea con stack y devuelve un warning para el mensaje al usuario."""
+    try:
+        gsheet.append_movement(mov)
+        return ""
+    except Exception as e:
+        log.exception("No pude empujar al GSheet")
+        return f"\n⚠️ GSheet falló: {type(e).__name__}: {str(e)[:120]}"
 
 
 def _split_cat_sub(s: str) -> tuple[str, str | None]:

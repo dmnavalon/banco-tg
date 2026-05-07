@@ -38,7 +38,12 @@ def _client() -> gspread.Client:
 
 
 def append_movement(mov: dict) -> None:
-    """Añade una fila al Google Sheet de Movimientos."""
+    """Añade una fila al Google Sheet de Movimientos.
+
+    Lanza la excepción al caller si falla — quien decide si reintentar o avisar
+    al usuario. Así evitamos marcar un movimiento como aprobado en Firestore
+    cuando el sheet falla silenciosamente.
+    """
     try:
         client = _client()
         sheet = client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
@@ -76,5 +81,6 @@ def append_movement(mov: dict) -> None:
         ]
         sheet.append_row(row, value_input_option="USER_ENTERED")
         log.info(f"GSheet OK: {fecha} · {mov.get('description','')[:40]}")
-    except Exception as e:
-        log.warning(f"GSheet falló ({type(e).__name__}): {e}")
+    except Exception:
+        log.exception("GSheet falló al hacer append_row")
+        raise
