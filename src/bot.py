@@ -20,7 +20,9 @@ TG_API = "https://api.telegram.org"
 VALID_BANKS = ["falabella", "bancochile"]
 
 _GREET_RE = re.compile(
-    r"^(hola+|hi|hey|ey+|buenas?(\s+(d[ií]as?|tardes?|noches?))?|buenos\s+d[ií]as?|saludos?|qu[eé]\s+tal|ola)[\s!.,😊👋]*$",
+    r"^(hol+[aáe]?|holis?|hi+|hey+|ey+|wena[s]?|buena[s]?(\s+(d[ií]as?|tardes?|noches?))?|"
+    r"buenos\s+d[ií]as?|saludos?|qu[eé]\s+tal|ol[aá]|hello|good\s+(morning|afternoon|evening)|"
+    r"qh|q\s+hay|q\s+onda|como\s+est[aá][s]?)[\s!.,😊👋🙋🤙]*$",
     re.IGNORECASE,
 )
 
@@ -133,6 +135,10 @@ def _handle_message(msg: dict[str, Any]) -> None:
         return
 
     response = feedback.apply(text, chat_id)
+    # Si feedback no tiene batch y el mensaje es corto, probablemente es un saludo no reconocido
+    if response == "No hay batch reciente. Manda /pending para reenviar." and len(text) <= 40:
+        threading.Thread(target=_handle_greeting, daemon=True).start()
+        return
     _send(response)
 
 
