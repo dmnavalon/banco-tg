@@ -228,25 +228,41 @@ def _dismiss_popups(page: Page) -> None:
 
 
 def _read_movements_tables(page: Page) -> dict | None:
-    """Lee tablas de movimientos con locators de Playwright (atraviesa shadow DOM de Angular)."""
+    """Lee tablas de movimientos con locators de Playwright (atraviesa shadow DOM de Angular).
+
+    Falabella muestra DOS tablas en "Últimos Movimientos":
+      1. "Pendientes de confirmación" — compras del día sin fecha asentada. IGNORAR.
+      2. "Fecha de compras" / movimientos confirmados — ESTA es la que queremos.
+
+    Las identificamos por el texto del primer ``<th>``. Si dice "pendiente",
+    saltamos esa tabla. De las que queden, elegimos la que más filas tenga.
+    """
     container = page.locator("app-movements-table")
     tables = container.locator("table").all()
     if not tables:
         return None
+
     best, max_rows = None, 0
+    best_headers: list[str] = []
     for t in tables:
+        headers = [h.inner_text().strip() for h in t.locator("thead tr th").all()]
+        first_header_lower = (headers[0] if headers else "").lower()
+        if "pendiente" in first_header_lower:
+            log.info(f"Saltando tabla de pendientes (header[0]={headers[0]!r})")
+            continue
         n = t.locator("tbody tr").count()
+        log.info(f"Tabla candidata (header[0]={headers[0] if headers else '∅'!r}): {n} filas")
         if n > max_rows:
-            max_rows, best = n, t
+            max_rows, best, best_headers = n, t, headers
+
     if not best or max_rows < 1:
         return None
-    headers = [h.inner_text().strip() for h in best.locator("thead tr th").all()]
     rows = [
         [td.inner_text().strip() for td in row.locator("td").all()]
         for row in best.locator("tbody tr").all()
         if row.locator("td").count() > 0
     ]
-    return {"headers": headers, "rows": rows}
+    return {"headers": best_headers, "rows": rows}
 
 
 def fetch_movements(page: Page) -> list[dict]:
