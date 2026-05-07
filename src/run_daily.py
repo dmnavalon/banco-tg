@@ -51,14 +51,30 @@ def make_otp_provider(timeout_seconds: int = 300) -> Callable[[str], str]:
     return provider
 
 
-def run_for_bank_full(bank: str, otp_provider: Callable[[str], str] | None = None) -> list[dict]:
+def run_for_bank_full(
+    bank: str,
+    otp_provider: Callable[[str], str] | None = None,
+    progress: Callable[[str], None] | None = None,
+) -> list[dict]:
     """Loguea, scrapea, clasifica los nuevos. Devuelve los movs nuevos clasificados."""
+    def _progress(msg: str) -> None:
+        log.info(msg)
+        if progress:
+            progress(msg)
+
     creds = secrets_store.load(bank)
     if not creds:
         raise RuntimeError(f"No hay credenciales configuradas para {bank}.")
     rut, password = creds
 
+    _progress(f"🔍 [{bank}] Conectando con el banco…")
     new_movements = scraper.run_for_bank(bank, rut, password, otp_provider)
+
+    if not new_movements:
+        _progress(f"📭 [{bank}] Sin movimientos nuevos en el banco.")
+        return []
+
+    _progress(f"📋 [{bank}] {len(new_movements)} movimiento(s) nuevo(s) encontrado(s). Clasificando con el agente…")
 
     classified: list[dict] = []
     for mov in new_movements:

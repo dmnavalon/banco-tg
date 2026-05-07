@@ -451,12 +451,12 @@ def _run_test_in_thread(bank: str) -> None:
     try:
         from . import run_daily
         otp = run_daily.make_otp_provider()
-        new = run_daily.run_for_bank_full(bank, otp)
+        new = run_daily.run_for_bank_full(bank, otp, progress=_send)
         if new:
-            _send(f"[{bank}] {len(new)} movimientos nuevos guardados.")
-            telegram_notify.send_daily_batch(new)
-        else:
-            _send(f"[{bank}] Sin movimientos nuevos.")
+            n = len(new)
+            _send(f"✅ [{bank}] {n} movimiento(s) clasificado(s). Enviando tarjetas…")
+            telegram_notify.send_movement_cards(new)
+        # Si no hay nuevos, run_for_bank_full ya envió el mensaje "Sin movimientos"
     except Exception as e:
         db.record_error(f"bot.test.{bank}", str(e), traceback.format_exc())
         _send(f"[{bank}] Error: {type(e).__name__}: {e}")
