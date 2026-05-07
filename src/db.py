@@ -407,3 +407,27 @@ def get_config(key: str) -> str | None:
 
 def set_config(key: str, value: str) -> None:
     _db().collection("config").document(key).set({"value": value, "updated_at": _now()})
+
+
+# ── pending_corrections (Force Reply) ──────────────────────────────────────
+# Cuando el usuario apreta "✏️ Corregir", el bot manda un mensaje con
+# force_reply y guarda aquí el mapping message_id → mov_id, para que cuando
+# el usuario responda (con reply_to_message_id) el bot sepa qué movimiento
+# corregir, sin importar cuántas correcciones tenga simultáneamente.
+
+def save_pending_correction(prompt_message_id: str, mov_id: str, chat_id: str, original_card_message_id: int | None = None) -> None:
+    _db().collection("pending_corrections").document(prompt_message_id).set({
+        "mov_id": mov_id,
+        "chat_id": chat_id,
+        "original_card_message_id": original_card_message_id,
+        "created_at": _now(),
+    })
+
+
+def get_pending_correction(prompt_message_id: str) -> dict | None:
+    snap = _db().collection("pending_corrections").document(prompt_message_id).get()
+    return snap.to_dict() if snap.exists else None
+
+
+def delete_pending_correction(prompt_message_id: str) -> None:
+    _db().collection("pending_corrections").document(prompt_message_id).delete()

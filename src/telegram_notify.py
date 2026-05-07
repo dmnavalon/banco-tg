@@ -265,6 +265,80 @@ def edit_message_text(chat_id: str, message_id: int, text: str, parse_mode: str 
         pass
 
 
+def edit_message_caption(chat_id: str, message_id: int, caption: str, parse_mode: str = "HTML", reply_markup: dict | None = None) -> None:
+    """Edita el caption de un mensaje sendPhoto. Necesario para tarjetas con foto:
+    editMessageText falla en mensajes con foto, hay que usar editMessageCaption."""
+    try:
+        payload: dict = {"chat_id": chat_id, "message_id": message_id, "caption": caption}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        requests.post(
+            f"{TG_API}/bot{_bot_token()}/editMessageCaption",
+            json=payload,
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
+def send_correction_prompt(chat_id: str, mov: dict) -> int | None:
+    """Manda un mensaje con force_reply para pedir la corrección de UN movimiento.
+    Telegram abre el campo de texto citando este mensaje, así no hay duda con cuál
+    movimiento se está hablando aunque haya N tarjetas en el chat.
+
+    Devuelve el message_id de Telegram (para mapear la respuesta al movimiento)
+    o None si falló el envío.
+    """
+    desc = (mov.get("description") or "")[:60]
+    amount_str = format_clp(abs(mov.get("amount") or 0))
+    fecha = mov.get("date") or ""
+    persona = mov.get("persona") or ""
+    persona_str = f" · {_esc(persona)}" if persona else ""
+
+    text = (
+        f"✏️ <b>Corrige este movimiento</b>\n"
+        f"📅 {_esc(fecha)} · 💸 {_esc(amount_str)}{persona_str}\n"
+        f"<code>{_esc(desc)}</code>\n\n"
+        f"Responde a <i>este</i> mensaje con texto libre.\n"
+        f"Ejemplos: «es del super», «esto va a Bodemall», «pádel del trabajo».\n"
+        f"Escribe «cancelar» para abortar."
+    )
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": {
+            "force_reply": True,
+            "selective": True,
+            "input_field_placeholder": "Texto libre o «cancelar»",
+        },
+    }
+    try:
+        r = requests.post(f"{TG_API}/bot{_bot_token()}/sendMessage", json=payload, timeout=10)
+        if r.status_code == 200 and r.json().get("ok"):
+            return r.json()["result"]["message_id"]
+        log.warning(f"send_correction_prompt {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        log.warning(f"send_correction_prompt falló: {e}")
+    return None
+
+
+def delete_message(chat_id: str, message_id: int) -> None:
+    """Elimina un mensaje del chat. Útil para limpiar el prompt de corrección
+    una vez que la respuesta ya fue procesada."""
+    try:
+        requests.post(
+            f"{TG_API}/bot{_bot_token()}/deleteMessage",
+            json={"chat_id": chat_id, "message_id": message_id},
+            timeout=5,
+        )
+    except Exception:
+        pass
+
+
 # ── Card builder ──────────────────────────────────────────────────────────────
 
 def _movement_card_text(mov: dict) -> str:

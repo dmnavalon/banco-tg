@@ -121,6 +121,17 @@ def _handle_message(msg: dict[str, Any]) -> None:
     if not text:
         return
 
+    # Force Reply: si el mensaje es respuesta a un prompt de corrección, rutear acá
+    # antes que cualquier otra cosa. Esto resuelve el caso de varias correcciones
+    # activas simultáneamente sin ambigüedad.
+    reply_to = msg.get("reply_to_message")
+    if reply_to:
+        reply_to_id = str(reply_to.get("message_id", ""))
+        pending = db.get_pending_correction(reply_to_id)
+        if pending:
+            _handle_correction_reply(text, chat_id, pending, reply_to_id)
+            return
+
     if text.lower().startswith("otp "):
         log.info("Mensaje OTP recibido — el provider lo recogerá desde telegram_log.")
         return
@@ -268,6 +279,17 @@ def _handle_command(text: str, chat_id: str) -> None:
     _send(f"Comando no reconocido: {cmd}. /help")
 
 
+def _edit_card(chat_id: str, message_id: int, mov: dict, new_text: str) -> None:
+    """Edita una tarjeta de movimiento. Si la tarjeta original tiene foto
+    (file_id en mov), usa editMessageCaption; si no, editMessageText.
+    Quita el inline keyboard (los botones) tras la decisión."""
+    has_photo = bool(mov.get("tg_photo_file_id"))
+    if has_photo:
+        telegram_notify.edit_message_caption(chat_id, message_id, new_text, reply_markup={"inline_keyboard": []})
+    else:
+        telegram_notify.edit_message_text(chat_id, message_id, new_text)
+
+
 def _handle_callback(callback: dict[str, Any]) -> None:
     callback_id = callback.get("id", "")
     chat = (callback.get("message") or {}).get("chat") or {}
@@ -305,30 +327,31 @@ def _handle_callback(callback: dict[str, Any]) -> None:
         label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
         if message_id:
             from .telegram_notify import _movement_card_text
-            telegram_notify.edit_message_text(
-                chat_id, message_id,
-                f"{_movement_card_text(mov)}\n\n✅ <b>Aprobado:</b> {label}",
-            )
+            _edit_card(chat_id, message_id, mov,
+                       f"{_movement_card_text(mov)}\n\n✅ <b>Aprobado:</b> {label}")
 
     elif action == "i":
         db.update_decision(mov_id, status="ignorado", final_category=None, final_subcategory=None, decided_by=chat_id)
         if message_id:
             from .telegram_notify import _movement_card_text
-            telegram_notify.edit_message_text(
-                chat_id, message_id,
-                f"{_movement_card_text(mov)}\n\n⚫ <b>Ignorado</b>",
-            )
+            _edit_card(chat_id, message_id, mov,
+                       f"{_movement_card_text(mov)}\n\n⚫ <b>Ignorado</b>")
 
     elif action == "c":
-        db.set_wizard_state(chat_id, "correcting", {"mov_id": mov_id, "message_id": message_id})
+        # Force Reply: mandar un prompt nuevo que abre el input citando este mensaje
+        # específico, así no hay confusión con cuál tarjeta se está corrigiendo.
+        prompt_id = telegram_notify.send_correction_prompt(chat_id, mov)
+        if prompt_id:
+            db.save_pending_correction(
+                prompt_message_id=str(prompt_id),
+                mov_id=mov_id,
+                chat_id=chat_id,
+                original_card_message_id=message_id,
+            )
         if message_id:
             from .telegram_notify import _movement_card_text
-            telegram_notify.edit_message_text(
-                chat_id,
-                message_id,
-                f"{_movement_card_text(mov)}\n\n✏️ <b>Escribe la corrección</b>\n"
-                "Formato: <code>Categoria</code> o <code>Categoria/Subcategoria</code>",
-            )
+            _edit_card(chat_id, message_id, mov,
+                       f"{_movement_card_text(mov)}\n\n✏️ <i>Esperando corrección…</i>")
 
 
 def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None:
@@ -420,6 +443,66 @@ def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None
 
     db.clear_wizard_state(chat_id)
     _send("Estado de wizard inválido, reseteado. Reintenta /cred <banco>.")
+
+
+def _handle_correction_reply(text: str, chat_id: str, pending: dict, prompt_msg_id: str) -> None:
+    """Procesa la respuesta del usuario a un prompt de Force Reply para corregir un movimiento.
+
+    El prompt fue generado al apretar "✏️ Corregir" en una tarjeta. La respuesta del
+    usuario (citando ese prompt) llega acá. Se re-clasifica con el LLM usando el texto
+    como hint y se reenvía una tarjeta nueva. Si el usuario escribe "cancelar", se
+    aborta y se vuelve a mandar la tarjeta original con sus botones.
+    """
+    mov_id = pending.get("mov_id", "")
+    # Limpiar el pending PRIMERO: si algo falla, el prompt no queda colgado.
+    db.delete_pending_correction(prompt_msg_id)
+
+    # Limpieza visual: borrar el prompt del chat (ya cumplió su función).
+    try:
+        telegram_notify.delete_message(chat_id, int(prompt_msg_id))
+    except Exception:
+        pass
+
+    movs = db.get_movements_by_ids([mov_id])
+    if not movs:
+        _send("Movimiento no encontrado en la base.")
+        return
+    mov = movs[0]
+
+    if text.strip().lower() in {"cancelar", "cancel", "abort", "abortar", "salir"}:
+        # Reenviar la tarjeta original con sus botones (nueva tarjeta, fresh).
+        telegram_notify.send_movement_cards([mov])
+        _send("✖️ Corrección cancelada.")
+        return
+
+    # Re-classify con la pista del usuario.
+    from . import classifier
+    try:
+        cls = classifier.classify_with_hint(
+            description=mov.get("description", ""),
+            amount=float(mov.get("amount") or 0),
+            hint=text,
+        )
+    except Exception as e:
+        log.exception("classify_with_hint falló")
+        _send(f"No pude reclasificar: {type(e).__name__}: {e}")
+        return
+
+    db.update_classification(
+        mov_id,
+        suggested_category=cls.category,
+        suggested_subcategory=cls.subcategory,
+        confidence=cls.confidence,
+        classifier_source=cls.source,
+        comercio=cls.comercio or mov.get("comercio"),
+        tipo=cls.tipo or mov.get("tipo"),
+        requiere_revision=cls.requiere_revision,
+        pregunta_sugerida=cls.pregunta_sugerida,
+    )
+
+    refreshed = db.get_movements_by_ids([mov_id])
+    if refreshed:
+        telegram_notify.send_movement_cards([refreshed[0]])
 
 
 def _handle_greeting() -> None:
