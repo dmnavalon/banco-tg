@@ -354,7 +354,8 @@ def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None
                 f"{_movement_card_text(mov)}\n\n✏️ <b>Corregido:</b> {label}{learned_html}",
             )
         else:
-            _send(f"Corregido: {label}{learned}")
+            learned_plain = f"\n📚 Regla aprendida: {pattern} → {cat}" if pattern and learned_html else ""
+            _send(f"Corregido: {label}{learned_plain}")
         return
 
     if state_name.startswith("awaiting_rut_"):
