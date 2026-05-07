@@ -23,7 +23,7 @@ TAXONOMY: dict[str, list[str]] = {
     "Hogar y alimentación":         ["Supermercado", "Alimentos", "Panadería", "Carnicería", "Verduras y frutas", "Delivery", "Restaurantes", "Cafeterías"],
     "Vivienda":                     ["Arriendo o dividendo", "Contribuciones", "Gastos comunes", "Mantención casa", "Jardín y piscina", "Muebles y decoración"],
     "Servicios básicos":            ["Luz", "Agua", "Gas", "Internet", "Telefonía móvil", "Streaming", "Alarmas y seguridad"],
-    "Educación":                    ["Colegio", "Jardín infantil", "Matrícula", "Útiles escolares", "Uniformes", "Transporte escolar", "Actividades escolares"],
+    "Educación":                    ["Colegio", "Jardín infantil", "Educación Hijos", "Matrícula", "Útiles escolares", "Uniformes", "Transporte escolar", "Actividades escolares"],
     "Niños":                        ["Actividades extracurriculares", "Juguetes", "Cumpleaños", "Ropa niños", "Salud niños", "Deportes niños"],
     "Salud y seguros":              ["Farmacia", "Consultas médicas", "Dentista", "Exámenes médicos", "Seguro de salud", "Seguro de vida", "Terapias"],
     "Transporte":                   ["Combustible", "Tag y peajes", "Estacionamientos", "Mantención auto", "Seguro auto", "Permiso de circulación", "Uber o taxi", "Transporte público"],
@@ -36,11 +36,18 @@ TAXONOMY: dict[str, list[str]] = {
     "Finanzas e impuestos":         ["Pago tarjeta de crédito", "Intereses y comisiones", "Impuestos", "Contador", "Seguros financieros"],
     "Ahorro e inversión":           ["Ahorro mensual", "Inversión financiera", "Fondo emergencia", "APV"],
     "Transferencias internas":      ["Movimiento entre cuentas", "Pago tarjeta mismo titular", "Traspaso a inversión"],
+    # Gastos hechos con tarjeta personal pero que se rinden a un tercero (empresa o familiar).
+    # Las subcategorías son los nombres de los terceros conocidos. Si no encaja con ninguno,
+    # el LLM puede inventar una nueva subcategoría — se acepta tal cual (no se fuerza a la lista).
+    "Gastos por rendir":            ["Bodemall", "Faind", "Amplia", "Papá", "Mamá", "Hermano", "Hermana"],
     "Otros":                        ["Varios", "Gastos no clasificados", "Ajustes manuales"],
 }
 
 INCOME_CATEGORIES = {"Sueldo", "Honorarios", "Dividendos y utilidades", "Inversiones", "Arriendos", "Reembolsos", "Otros ingresos"}
 INTERNAL_CATEGORIES = {"Transferencias internas"}
+# Categorías cuyas subcategorías son extensibles: el LLM puede proponer una nueva
+# y se acepta tal cual (en vez de forzarla a la primera de TAXONOMY[cat]).
+EXTENSIBLE_CATEGORIES = {"Gastos por rendir"}
 
 AGENT_MODEL = "claude-haiku-4-5-20251001"
 AGENT_MAX_TOKENS = 1024
@@ -59,7 +66,9 @@ Reglas principales:
 7. Si es sueldo, honorarios, dividendos, intereses o arriendos recibidos, clasifícalo como Ingreso.
 8. Si confianza < 0.75, entonces requiere_revision debe ser true.
 9. No uses "Otros" si existe una categoría más específica.
-10. No inventes categorías. No inventes subcategorías. No asumas información no disponible."""
+10. No inventes categorías. No inventes subcategorías (con la excepción de la regla 12).
+11. Jardines infantiles y colegios privados de hijos clasifican como Educación / Educación Hijos. Por ejemplo "LEONCITO ESPAÑOL" es un jardín infantil de los hijos de Diego.
+12. EXCEPCIÓN PARA "Gastos por rendir": esta categoría se usa para gastos hechos con la tarjeta personal pero que se rendirán a un tercero (empresa o familiar). La subcategoría es el NOMBRE del tercero a quien se rinde. Si el contexto del usuario menciona un nombre que NO está en la lista predefinida (Bodemall, Faind, Amplia, Papá, Mamá, Hermano, Hermana), inventa la subcategoría con ese nombre tal cual lo entregó el usuario. NO uses esta categoría sin un hint explícito del usuario que indique que es por rendir."""
 
 
 class Classification(NamedTuple):
@@ -98,7 +107,17 @@ def classify(description: str, amount: float) -> Classification:
     return _classify_with_agent(description, amount)
 
 
-def _classify_with_agent(description: str, amount: float) -> Classification:
+def classify_with_hint(description: str, amount: float, hint: str) -> Classification:
+    """Re-clasifica un movimiento incorporando una pista en lenguaje natural del usuario.
+
+    Útil para correcciones: el usuario explica qué tipo de gasto es ("es del super",
+    "esto va a Bodemall", etc.) y el LLM lo interpreta usando la taxonomía.
+    Salta la búsqueda de reglas y va directo al agente con el hint inyectado.
+    """
+    return _classify_with_agent(description, amount, hint=hint.strip() or None)
+
+
+def _classify_with_agent(description: str, amount: float, hint: str | None = None) -> Classification:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         log.warning("ANTHROPIC_API_KEY no está seteada. Cayendo a fallback.")
@@ -138,10 +157,11 @@ def _classify_with_agent(description: str, amount: float) -> Classification:
         },
     }
 
+    hint_block = f"\n\nPista del usuario (importante, úsala para decidir): {hint}" if hint else ""
     user_message = (
         f"Clasifica este movimiento bancario chileno.\n"
         f"Descripción: {description}\n"
-        f"Monto CLP: {amount} ({flow})\n\n"
+        f"Monto CLP: {amount} ({flow}){hint_block}\n\n"
         f"Taxonomía autorizada:\n{taxonomy_lines}"
     )
 
@@ -176,7 +196,12 @@ def _classify_with_agent(description: str, amount: float) -> Classification:
         cat = "Otros ingresos" if amount > 0 else "Otros"
         sub = "Ingresos extraordinarios" if amount > 0 else "Gastos no clasificados"
     elif sub not in TAXONOMY[cat]:
-        sub = TAXONOMY[cat][0]
+        if cat in EXTENSIBLE_CATEGORIES and sub:
+            # El LLM puede inventar subcategorías para categorías extensibles
+            # (ej. nuevo tercero a quien rendir un gasto). La aceptamos tal cual.
+            log.info(f"Subcategoría libre aceptada para {cat}: {sub!r}")
+        else:
+            sub = TAXONOMY[cat][0]
 
     conf = max(0.0, min(1.0, float(parsed.get("confianza") or 0.0)))
     requiere_revision = bool(parsed.get("requiere_revision", conf < 0.75))

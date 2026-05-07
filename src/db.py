@@ -54,6 +54,7 @@ def insert_movement(
     tipo: str | None = None,
     requiere_revision: bool = False,
     pregunta_sugerida: str | None = None,
+    persona: str | None = None,
 ) -> bool:
     ref = _db().collection("movements").document(mov_id)
     if ref.get().exists:
@@ -75,15 +76,23 @@ def insert_movement(
         "tipo": tipo or ("Ingreso" if (amount or 0) > 0 else "Egreso"),
         "requiere_revision": requiere_revision,
         "pregunta_sugerida": pregunta_sugerida,
+        "persona": persona,
         "status": "pendiente",
         "final_category": None,
         "final_subcategory": None,
         "decided_by": None,
         "decided_at": None,
         "notified_at": None,
+        "tg_photo_file_id": None,
         "inserted_at": _now(),
     })
     return True
+
+
+def set_movement_photo_file_id(mov_id: str, file_id: str) -> None:
+    """Guarda el file_id que retorna Telegram al subir el screenshot del movimiento.
+    Permite reusarlo (sendPhoto con file_id) en lugar de re-subir bytes cada vez."""
+    _db().collection("movements").document(mov_id).update({"tg_photo_file_id": file_id})
 
 
 def update_classification(

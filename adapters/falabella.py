@@ -227,23 +227,22 @@ def _dismiss_popups(page: Page) -> None:
             break
 
 
-def _read_movements_tables(page: Page) -> dict | None:
-    """Lee tablas de movimientos con locators de Playwright (atraviesa shadow DOM de Angular).
+def _select_confirmed_table(page: Page):
+    """Encuentra la tabla de movimientos confirmados (NO la de Pendientes de confirmación).
 
     Falabella muestra DOS tablas en "Últimos Movimientos":
       1. "Pendientes de confirmación" — compras del día sin fecha asentada. IGNORAR.
       2. "Fecha de compras" / movimientos confirmados — ESTA es la que queremos.
 
-    Las identificamos por el texto del primer ``<th>``. Si dice "pendiente",
-    saltamos esa tabla. De las que queden, elegimos la que más filas tenga.
+    Las identificamos por el texto del primer ``<th>``. Si dice "pendiente", la salta.
+    Devuelve (table_locator, headers) o (None, []) si no encuentra.
     """
     container = page.locator("app-movements-table")
     tables = container.locator("table").all()
     if not tables:
-        return None
+        return None, []
 
-    best, max_rows = None, 0
-    best_headers: list[str] = []
+    best, max_rows, best_headers = None, -1, []
     for t in tables:
         headers = [h.inner_text().strip() for h in t.locator("thead tr th").all()]
         first_header_lower = (headers[0] if headers else "").lower()
@@ -254,15 +253,85 @@ def _read_movements_tables(page: Page) -> dict | None:
         log.info(f"Tabla candidata (header[0]={headers[0] if headers else '∅'!r}): {n} filas")
         if n > max_rows:
             max_rows, best, best_headers = n, t, headers
+    return best, best_headers
 
-    if not best or max_rows < 1:
-        return None
-    rows = [
-        [td.inner_text().strip() for td in row.locator("td").all()]
-        for row in best.locator("tbody tr").all()
-        if row.locator("td").count() > 0
-    ]
-    return {"headers": best_headers, "rows": rows}
+
+def _capture_modal_screenshot(page: Page, row) -> bytes | None:
+    """Click en una fila para abrir el modal de detalle, captura screenshot del modal y lo cierra.
+
+    Devuelve los bytes PNG del modal o None si falla. Garantiza que el modal queda
+    cerrado al salir (incluso si algo falla en el medio).
+    """
+    try:
+        row.click(timeout=5000)
+        modal = page.locator("div.modal-content").first
+        modal.wait_for(state="visible", timeout=8000)
+        page.wait_for_timeout(400)  # espera animación
+        png = modal.screenshot(timeout=6000)
+    except Exception as e:
+        log.warning(f"No pude capturar screenshot del modal: {type(e).__name__}: {e}")
+        png = None
+    finally:
+        # Cierra el modal por todos los caminos posibles, en orden de preferencia.
+        try:
+            close_btn = page.locator("button.close-movements").first
+            if close_btn.is_visible(timeout=1000):
+                close_btn.click(timeout=2000)
+                page.wait_for_timeout(300)
+            else:
+                page.keyboard.press("Escape")
+                page.wait_for_timeout(300)
+        except Exception:
+            try:
+                page.keyboard.press("Escape")
+            except Exception:
+                pass
+    return png
+
+
+def _go_to_next_page(page: Page) -> bool:
+    """Click en el botón 'avanzar' de la paginación si está habilitado. Retorna True si avanzó."""
+    try:
+        next_btn = page.locator('button.btn-pagination:has(img[alt="boton avanzar"])').first
+        if not next_btn.is_visible(timeout=1500):
+            return False
+        if next_btn.is_disabled():
+            return False
+        next_btn.click(timeout=3000)
+        page.wait_for_timeout(2000)
+        return True
+    except Exception as e:
+        log.info(f"Sin siguiente página o falló avanzar: {type(e).__name__}: {e}")
+        return False
+
+
+def _read_current_page(page: Page, capture_screenshots: bool = True) -> list[dict]:
+    """Lee la página actual de la tabla de movimientos confirmados.
+
+    Por cada fila, parsea las celdas y opcionalmente captura un screenshot del
+    modal de detalle. Devuelve lista de movimientos (vacía si no hay).
+    """
+    table, headers = _select_confirmed_table(page)
+    if table is None:
+        return []
+
+    rows = table.locator("tbody tr")
+    n_rows = rows.count()
+    log.info(f"Página actual: {len(headers)} columnas, {n_rows} filas")
+
+    results: list[dict] = []
+    for i in range(n_rows):
+        row = rows.nth(i)
+        if row.locator("td").count() == 0:
+            continue
+        cells = [td.inner_text().strip() for td in row.locator("td").all()]
+        mov = _parse_row(cells)
+        if not mov:
+            continue
+        if capture_screenshots:
+            mov["screenshot_bytes"] = _capture_modal_screenshot(page, row)
+        results.append(mov)
+    return results
 
 
 def fetch_movements(page: Page) -> list[dict]:
@@ -303,19 +372,23 @@ def fetch_movements(page: Page) -> list[dict]:
     except PWTimeout:
         pass
 
-    table = _read_movements_tables(page)
-    if not table:
-        raise ScraperBroken("No encontré tabla de movimientos en Falabella.")
-
-    log.info(f"Tabla Falabella: {len(table['headers'])} columnas, {len(table['rows'])} filas.")
-
     movements: list[dict] = []
-    for cells in table["rows"]:
-        mov = _parse_row(cells)
-        if mov:
-            movements.append(mov)
+    page_num = 1
+    max_pages = 50  # safety guard contra loop infinito si la paginación se rompe
+    while page_num <= max_pages:
+        log.info(f"Procesando página {page_num} de movimientos…")
+        rows = _read_current_page(page, capture_screenshots=True)
+        if not rows:
+            log.info(f"Página {page_num} vacía. Cortando.")
+            break
+        log.info(f"Página {page_num}: {len(rows)} movimientos parseados")
+        movements.extend(rows)
+        if not _go_to_next_page(page):
+            log.info(f"Llegué a la última página ({page_num}). Total: {len(movements)} movimientos.")
+            break
+        page_num += 1
 
-    log.info(f"Falabella: {len(movements)} movimientos parseados.")
+    log.info(f"Falabella: {len(movements)} movimientos totales.")
     return movements
 
 
@@ -324,6 +397,9 @@ def _parse_row(cells: list[str]) -> dict | None:
 
     Columnas reales: Fecha (DD/MM/YYYY), Descripción, Persona, Monto,
     Cuotas, Cuota a pagar, Cambio cuotas, Vacío.
+
+    Devuelve `persona` como campo separado en el dict (Titular / Adicional / nombre)
+    en vez de inyectarlo en la descripción. La descripción mantiene solo la cuota.
     """
     if len(cells) < 4:
         return None
@@ -338,8 +414,6 @@ def _parse_row(cells: list[str]) -> dict | None:
 
     monto = parse_clp_amount(monto_raw) or 0.0
     desc = descripcion
-    if persona and persona.upper() != "TITULAR":
-        desc = f"{desc} [{persona}]"
     if cuotas and cuotas != "/":
         desc = f"{desc} ({cuotas})"
 
@@ -349,4 +423,5 @@ def _parse_row(cells: list[str]) -> dict | None:
         "amount": -abs(monto),
         "movement_type": "cargo",
         "account": "falabella",
+        "persona": persona or None,
     }

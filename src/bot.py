@@ -36,11 +36,15 @@ HELP_TEXT = (
     "/test <banco> — ejecuta scrape ahora\n"
     "/run — corre el daily completo\n"
     "/status — bancos configurados y estado\n"
-    "/pending — re-envía pendientes no notificados\n"
+    "/pending — re-envía pendientes no notificados (de a 5)\n"
+    "/next — siguientes 5 tarjetas si quedaron en cola\n"
     "/last [N] — últimos N movimientos (default 10, máx 50)\n"
     "\n"
-    "También respondes al batch con: «1 ok», «2 alimentacion»,\n"
-    "«2 alimentacion/super», «3 ignorar», «todo ok»."
+    "Para responder un movimiento puedes:\n"
+    " • Usar los botones de la tarjeta (✅ Aprobar / ✏️ Corregir / 🚫 Ignorar)\n"
+    " • Escribir «1 ok», «2 ignorar», «todo ok»\n"
+    " • Corregir con texto libre («2 es del super», «3 esto va a Bodemall»)\n"
+    "   y el agente categoriza solo, te reenvía la tarjeta para confirmar."
 )
 
 
@@ -238,6 +242,10 @@ def _handle_command(text: str, chat_id: str) -> None:
         _send("Reenviando pendientes…")
         return
 
+    if cmd == "/next":
+        threading.Thread(target=_send_next_page, daemon=True).start()
+        return
+
     if cmd == "/last":
         n = 10
         if args:
@@ -340,28 +348,45 @@ def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None
             _send("Movimiento no encontrado en la base.")
             return
         mov = movs[0]
-        cat, sub = _split_cat_sub(text)
-        db.update_decision(mov_id, status="corregido", final_category=cat, final_subcategory=sub, decided_by=chat_id)
+
+        # Re-clasificar con la pista del usuario en lenguaje natural.
+        from . import classifier
         try:
-            gsheet.append_movement({**mov, "final_category": cat, "final_subcategory": sub})
+            cls = classifier.classify_with_hint(
+                description=mov.get("description", ""),
+                amount=float(mov.get("amount") or 0),
+                hint=text,
+            )
         except Exception as e:
-            log.warning(f"gsheet.append_movement falló: {e}")
-        pattern = _extract_pattern(mov.get("description", ""))
-        learned_html = ""
-        if pattern:
-            rule_id = db.add_rule(match_type="contains", pattern=pattern, category=cat, subcategory=sub)
-            if rule_id:
-                learned_html = f"\n📚 Regla aprendida: <code>{_hesc(pattern)}</code> → {_hesc(cat)}"
-        label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
+            log.exception("classify_with_hint falló")
+            _send(f"No pude reclasificar con tu hint: {type(e).__name__}: {e}")
+            return
+
+        # Persistir la nueva sugerencia (queda como suggested_*, sigue 'pendiente').
+        db.update_classification(
+            mov_id,
+            suggested_category=cls.category,
+            suggested_subcategory=cls.subcategory,
+            confidence=cls.confidence,
+            classifier_source=cls.source,
+            comercio=cls.comercio or mov.get("comercio"),
+            tipo=cls.tipo or mov.get("tipo"),
+            requiere_revision=cls.requiere_revision,
+            pregunta_sugerida=cls.pregunta_sugerida,
+        )
+
+        # Cerrar la tarjeta vieja con un nudge y reenviar una nueva con la categorización.
         if message_id:
             from .telegram_notify import _movement_card_text
             telegram_notify.edit_message_text(
                 chat_id, message_id,
-                f"{_movement_card_text(mov)}\n\n✏️ <b>Corregido:</b> {label}{learned_html}",
+                f"{_movement_card_text(mov)}\n\n🔁 <b>Re-categorizando con:</b> <i>{_hesc(text)}</i>",
             )
-        else:
-            learned_plain = f"\n📚 Regla aprendida: {pattern} → {cat}" if pattern and learned_html else ""
-            _send(f"Corregido: {label}{learned_plain}")
+
+        # Releer y mandar tarjeta nueva con la sugerencia actualizada.
+        movs = db.get_movements_by_ids([mov_id])
+        if movs:
+            telegram_notify.send_movement_cards([movs[0]])
         return
 
     if state_name.startswith("awaiting_rut_"):
@@ -442,13 +467,22 @@ def _split_cat_sub(s: str) -> tuple[str, str | None]:
     return cat, sub
 
 
+_PATTERN_STOPWORDS = {
+    "COMPRA", "COMPRAS", "PAGO", "PAGOS", "TRANSFERENCIA", "TRANSFER",
+    "ABONO", "CARGO", "PRESTAMO", "AVANCE", "CMR", "WEBPAY", "MERPAGO",
+    "MERCADOPAGO", "ONECLICK", "RECURRENTE", "TARJETA",
+}
+
+
 def _extract_pattern(description: str) -> str | None:
+    """Toma el primer token alfabético ≥4 chars que NO sea un stopword genérico.
+    Evita aprender reglas como pattern='COMPRA' que matchearían cualquier movimiento."""
     from .utils import normalize
     norm = normalize(description)
     if not norm:
         return None
     for token in re.split(r"[^A-Z]+", norm):
-        if len(token) >= 4:
+        if len(token) >= 4 and token not in _PATTERN_STOPWORDS:
             return token
     return None
 
@@ -475,6 +509,16 @@ def _run_daily_in_thread() -> None:
     except Exception as e:
         db.record_error("bot.run_daily", str(e), traceback.format_exc())
         _send(f"Daily falló: {type(e).__name__}: {e}")
+
+
+def _send_next_page() -> None:
+    try:
+        msg = telegram_notify.send_next_batch_page()
+        if msg:
+            _send(msg)
+    except Exception as e:
+        db.record_error("bot.next", str(e), traceback.format_exc())
+        _send(f"Error en /next: {type(e).__name__}: {e}")
 
 
 def _resend_pending() -> None:

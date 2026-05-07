@@ -269,7 +269,9 @@ def edit_message_text(chat_id: str, message_id: int, text: str, parse_mode: str 
 
 def _movement_card_text(mov: dict) -> str:
     bank = _esc((mov.get("bank") or "").capitalize())
-    desc = _esc(mov.get("description") or "")
+    desc_raw = _esc(mov.get("description") or "")
+    fecha = _esc(mov.get("date") or "")
+    persona = _esc(mov.get("persona") or "")
     amount = mov.get("amount") or 0
     amount_str = _esc(format_clp(abs(amount)))
     comercio = _esc(mov.get("comercio") or "-")
@@ -284,13 +286,16 @@ def _movement_card_text(mov: dict) -> str:
     header = _TIPO_HEADER.get(tipo, f"🔴 <b>Nuevo movimiento</b>")
 
     sub_str = f" → {sub_emoji} {_esc(sub)}" if sub else ""
+    persona_line = f"\n👤 <b>Persona:</b> {persona}" if persona else ""
 
     lines = [
         header,
         "",
         f"🏦 <b>Banco:</b> {bank}",
+        f"📅 <b>Fecha:</b> {fecha}",
+        f"📝 <b>Descripción:</b> <code>{desc_raw}</code>",
         f"🏪 <b>Comercio:</b> {comercio}",
-        f"💸 <b>Monto:</b> {amount_str}",
+        f"💸 <b>Monto:</b> {amount_str}{persona_line}",
         "",
         f"🏷️ <b>Categoría propuesta</b>",
         f"{cat_emoji} {_esc(cat)}{sub_str}",
@@ -313,55 +318,157 @@ def _movement_keyboard(mov_id: str) -> dict:
     }
 
 
-def send_movement_cards(movements: Sequence[dict]) -> bool:
-    if not movements:
-        send_message("Sin movimientos nuevos para revisar hoy.")
-        return True
+# Cuántas tarjetas se muestran de una vez antes de exigir /next.
+BATCH_PAGE_SIZE = 5
 
-    target = _chat_id()
-    url = f"{TG_API}/bot{_bot_token()}/sendMessage"
-    ids_sent: list[str] = []
 
-    for mov in movements:
-        mov_id = mov["id"]
-        text = _movement_card_text(mov)
-        keyboard = _movement_keyboard(mov_id)
+def _send_one_card(mov: dict, target: str) -> bool:
+    """Envía UNA tarjeta. Si el movimiento trae screenshot_bytes, usa sendPhoto y
+    persiste el file_id devuelto por Telegram para reusarlo en envíos futuros.
+    Si trae tg_photo_file_id pre-existente, lo reutiliza sin re-subir bytes.
+    Si no hay foto disponible, fallback a sendMessage de texto."""
+    mov_id = mov["id"]
+    text = _movement_card_text(mov)
+    keyboard = _movement_keyboard(mov_id)
+    screenshot = mov.get("screenshot_bytes")
+    file_id = mov.get("tg_photo_file_id")
 
-        sent = False
-        for delay in [0, 2, 5]:
-            if delay:
-                time.sleep(delay)
-            try:
-                r = requests.post(url, json={
+    base_url = f"{TG_API}/bot{_bot_token()}"
+
+    for delay in [0, 2, 5]:
+        if delay:
+            time.sleep(delay)
+        try:
+            if screenshot or file_id:
+                # sendPhoto — el caption acepta hasta 1024 chars con HTML.
+                if screenshot:
+                    files = {"photo": ("modal.png", screenshot, "image/png")}
+                    data = {
+                        "chat_id": target,
+                        "caption": text[:1024],
+                        "parse_mode": "HTML",
+                        "reply_markup": __import__("json").dumps(keyboard),
+                    }
+                    r = requests.post(f"{base_url}/sendPhoto", data=data, files=files, timeout=30)
+                else:
+                    r = requests.post(f"{base_url}/sendPhoto", json={
+                        "chat_id": target,
+                        "photo": file_id,
+                        "caption": text[:1024],
+                        "parse_mode": "HTML",
+                        "reply_markup": keyboard,
+                    }, timeout=20)
+            else:
+                r = requests.post(f"{base_url}/sendMessage", json={
                     "chat_id": target,
                     "text": text,
                     "parse_mode": "HTML",
                     "reply_markup": keyboard,
                     "disable_web_page_preview": True,
                 }, timeout=20)
-                if r.status_code == 200 and r.json().get("ok"):
-                    ids_sent.append(mov_id)
-                    sent = True
-                    break
-                log.warning(f"sendMessage card {r.status_code}: {r.text[:200]}")
-            except requests.RequestException as e:
-                log.warning(f"send card falló: {e}")
 
-        if not sent:
-            log.error(f"No se pudo enviar tarjeta para {mov_id}")
+            if r.status_code == 200 and r.json().get("ok"):
+                # Si subimos bytes nuevos, capturar el file_id de la foto más grande
+                # para reusarlo en /pending o reenvíos posteriores.
+                if screenshot and not file_id:
+                    photos = (r.json().get("result") or {}).get("photo") or []
+                    if photos:
+                        # Tomar el de mayor resolución (último)
+                        new_file_id = photos[-1].get("file_id")
+                        if new_file_id:
+                            try:
+                                db.set_movement_photo_file_id(mov_id, new_file_id)
+                            except Exception as e:
+                                log.warning(f"No pude guardar tg_photo_file_id de {mov_id}: {e}")
+                return True
+            log.warning(f"send card {r.status_code}: {r.text[:200]}")
+        except requests.RequestException as e:
+            log.warning(f"send card falló: {e}")
+    return False
+
+
+def send_movement_cards(movements: Sequence[dict]) -> bool:
+    """Envía tarjetas en lotes de BATCH_PAGE_SIZE. Si hay más, guarda los IDs
+    restantes en config/last_batch_remaining y avisa con un mensaje pidiendo /next."""
+    if not movements:
+        send_message("Sin movimientos nuevos para revisar hoy.")
+        return True
+
+    target = _chat_id()
+    total = len(movements)
+    first_page = list(movements[:BATCH_PAGE_SIZE])
+    overflow = list(movements[BATCH_PAGE_SIZE:])
+
+    ids_sent: list[str] = []
+    for mov in first_page:
+        if _send_one_card(mov, target):
+            ids_sent.append(mov["id"])
+        else:
+            log.error(f"No se pudo enviar tarjeta para {mov.get('id')}")
 
     if ids_sent:
+        # Estos IDs son los visibles AHORA — feedback.apply los usa para "1 ok", "2 supermercado", etc.
         db.set_batch_ids(ids_sent)
         db.mark_notified(ids_sent)
         db.record_telegram_log(
             direction="out",
             chat_id=target,
             message_id="batch",
-            text=f"{len(ids_sent)} tarjetas enviadas",
+            text=f"{len(ids_sent)}/{total} tarjetas enviadas",
             payload=",".join(ids_sent),
         )
 
-    return len(ids_sent) == len(movements)
+    # Persistir los IDs restantes para que /next los recupere.
+    if overflow:
+        overflow_ids = [m["id"] for m in overflow]
+        db.set_config("last_batch_remaining", ",".join(overflow_ids))
+        send_message(
+            f"📦 Te mostré {len(ids_sent)} de {total}. "
+            f"Para los próximos {min(BATCH_PAGE_SIZE, len(overflow))}, mándame /next.\n"
+            f"Quedan {len(overflow)} pendientes en cola."
+        )
+    else:
+        # No hay más: limpiar el overflow por si quedó residual.
+        try:
+            db.set_config("last_batch_remaining", "")
+        except Exception:
+            pass
+
+    return len(ids_sent) == len(first_page)
+
+
+def send_next_batch_page() -> str:
+    """Envía la siguiente página del batch acumulado en config/last_batch_remaining.
+    Devuelve el mensaje de status para responder al comando /next."""
+    raw = db.get_config("last_batch_remaining") or ""
+    remaining_ids = [x.strip() for x in raw.split(",") if x.strip()]
+    if not remaining_ids:
+        return "No hay más pendientes en cola. Manda /pending si quieres reenviar todos."
+
+    take = remaining_ids[:BATCH_PAGE_SIZE]
+    rest = remaining_ids[BATCH_PAGE_SIZE:]
+
+    movs = db.get_movements_by_ids(take)
+    if not movs:
+        # Los IDs en cola ya no existen — limpieza.
+        db.set_config("last_batch_remaining", "")
+        return "Los pendientes en cola ya no existen en la base. Cola limpiada."
+
+    target = _chat_id()
+    ids_sent: list[str] = []
+    for mov in movs:
+        if _send_one_card(mov, target):
+            ids_sent.append(mov["id"])
+
+    if ids_sent:
+        db.set_batch_ids(ids_sent)
+        db.mark_notified(ids_sent)
+
+    db.set_config("last_batch_remaining", ",".join(rest))
+
+    if rest:
+        return f"📦 Te mostré {len(ids_sent)} más. Quedan {len(rest)}. /next para los próximos."
+    return f"✅ Te mostré los últimos {len(ids_sent)}. No quedan más en cola."
 
 
 # Alias de compatibilidad

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from . import db, gsheet
+from . import classifier, db, gsheet, telegram_notify
 from .utils import get_logger, normalize
 
 log = get_logger("feedback")
@@ -81,27 +81,33 @@ def apply(text: str, chat_id: str) -> str:
         )
         return f"Ignorado #{idx} ✓"
 
-    cat, sub = _split_cat_sub(rest)
-    db.update_decision(
-        mov_id,
-        status="corregido",
-        final_category=cat,
-        final_subcategory=sub,
-        decided_by=chat_id,
-    )
-    gsheet_warn = _try_append({**mov, "final_category": cat, "final_subcategory": sub})
-    pattern = _extract_pattern(mov["description"])
-    learned = ""
-    if pattern:
-        rule_id = db.add_rule(
-            match_type="contains",
-            pattern=pattern,
-            category=cat,
-            subcategory=sub,
+    # Texto libre como hint: re-clasificar con el LLM y reenviar tarjeta para confirmar.
+    try:
+        cls = classifier.classify_with_hint(
+            description=mov.get("description", ""),
+            amount=float(mov.get("amount") or 0),
+            hint=rest,
         )
-        if rule_id:
-            learned = f" (regla aprendida: {pattern} → {cat})"
-    return f"Corregido #{idx}: {cat}{('/' + sub) if sub else ''} ✓{learned}{gsheet_warn}"
+    except Exception as e:
+        log.exception("classify_with_hint falló")
+        return f"No pude reclasificar #{idx}: {type(e).__name__}: {e}"
+
+    db.update_classification(
+        mov_id,
+        suggested_category=cls.category,
+        suggested_subcategory=cls.subcategory,
+        confidence=cls.confidence,
+        classifier_source=cls.source,
+        comercio=cls.comercio or mov.get("comercio"),
+        tipo=cls.tipo or mov.get("tipo"),
+        requiere_revision=cls.requiere_revision,
+        pregunta_sugerida=cls.pregunta_sugerida,
+    )
+
+    refreshed = db.get_movements_by_ids([mov_id])
+    if refreshed:
+        telegram_notify.send_movement_cards([refreshed[0]])
+    return f"🔁 Re-categorizando #{idx} con: «{rest[:60]}»"
 
 
 def _approve_all(ids: list[str], chat_id: str) -> str:
@@ -148,16 +154,20 @@ def _split_cat_sub(s: str) -> tuple[str, str | None]:
     return cat, sub
 
 
-def _extract_pattern(description: str) -> str | None:
-    """Extrae el primer token alfabético ≥4 chars de la descripción.
+_PATTERN_STOPWORDS = {
+    "COMPRA", "COMPRAS", "PAGO", "PAGOS", "TRANSFERENCIA", "TRANSFER",
+    "ABONO", "CARGO", "PRESTAMO", "AVANCE", "CMR", "WEBPAY", "MERPAGO",
+    "MERCADOPAGO", "ONECLICK", "RECURRENTE", "TARJETA",
+}
 
-    Heurística mínima v1. TODO v2: normalizar prefijos comunes
-    (MERPAGO*, WEBPAY*, RIPLEY*).
-    """
+
+def _extract_pattern(description: str) -> str | None:
+    """Primer token alfabético ≥4 chars que NO sea un stopword genérico
+    (COMPRA, PAGO, etc). Evita reglas demasiado amplias que misclasifiquen todo."""
     norm = normalize(description)
     if not norm:
         return None
     for token in re.split(r"[^A-Z]+", norm):
-        if len(token) >= 4:
+        if len(token) >= 4 and token not in _PATTERN_STOPWORDS:
             return token
     return None

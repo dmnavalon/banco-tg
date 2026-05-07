@@ -92,6 +92,8 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
             bank=bank,
             account=raw.get("account") or bank,
         )
+        # raw_blob se serializa a JSON: extraer los bytes del screenshot antes (no son JSON-friendly).
+        screenshot_bytes = raw.pop("screenshot_bytes", None) if isinstance(raw, dict) else None
         inserted = db.insert_movement(
             mov_id=mid,
             date_iso=raw["date"],
@@ -101,6 +103,7 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
             account=raw.get("account") or bank,
             bank=bank,
             raw_blob=json.dumps(raw, ensure_ascii=False),
+            persona=raw.get("persona"),
         )
         if inserted:
             new_movements.append({
@@ -111,6 +114,8 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
                 "movement_type": raw.get("movement_type"),
                 "account": raw.get("account") or bank,
                 "bank": bank,
+                "persona": raw.get("persona"),
+                "screenshot_bytes": screenshot_bytes,
             })
 
     log.info(f"{bank}: {len(new_movements)} movimientos nuevos (de {len(raw_movements)} leídos)")
