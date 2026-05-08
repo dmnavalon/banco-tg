@@ -69,6 +69,38 @@ SEL_OTP_SUBMIT = [
     'button[type="submit"]',
 ]
 
+# Selectores SIEMPRE contextualizados a un overlay explícito — evita matchear
+# "Cerrar sesión" del header u otros botones de cierre fuera de modales.
+# (Mismo principio que Falabella: el quirk del 2026-05-07 nos enseñó que
+# selectores globales como `button[aria-label*="cerrar" i]` cierran la sesión.)
+SEL_POPUP_CLOSE = [
+    '[role="dialog"] button[aria-label*="cerrar" i]',
+    '[role="dialog"] button[aria-label*="close" i]',
+    '[class*="modal"] button[aria-label*="cerrar" i]',
+    '[class*="modal"] button[aria-label*="close" i]',
+    '[class*="popup"] button[aria-label*="cerrar" i]',
+    '[class*="popup"] button[aria-label*="close" i]',
+    '[class*="overlay"] button[aria-label*="cerrar" i]',
+    '[class*="overlay"] button[aria-label*="close" i]',
+    '[role="dialog"] button[title*="cerrar" i]',
+    '[class*="modal"] button[title*="cerrar" i]',
+    '[class*="modal"] button[class*="close"]',
+    '[class*="popup"] button[class*="close"]',
+    '[class*="overlay"] [class*="close"]',
+    'button.modal-close',
+    '.modal-header .close',
+    '[role="dialog"] button:has-text("×")',
+    '[role="dialog"] button:has-text("✕")',
+    '[class*="modal"] button:has-text("×")',
+    '[class*="modal"] button:has-text("✕")',
+    # BCh usa Material Dialog, que tiene selectores específicos
+    '.mat-dialog-container button[aria-label*="close" i]',
+    '.mat-dialog-container button.close',
+    '.cdk-overlay-pane button[aria-label*="cerrar" i]',
+    '.cdk-overlay-pane button[mat-dialog-close]',
+    'button[mat-dialog-close]',
+]
+
 # OJO: NO usar un regex laxo aquí. Una URL de Auth0 como
 # `https://login.portales.bancochile.cl/authorize?...&redirect_uri=https%3A%2F%2Fportalpersonas.bancochile.cl%3A443%2F...`
 # contiene `portalpersonas.bancochile.cl` URL-encoded en los query params, y
@@ -91,6 +123,60 @@ def _is_at_dashboard(url: str) -> bool:
 
 # Para `page.wait_for_url(...)` que acepta callable: pasamos la función misma.
 DASHBOARD_PATTERN = _is_at_dashboard
+
+
+def _dismiss_popups(page: Page) -> None:
+    """Cierra popups publicitarios / modales de bienvenida que BCh muestra
+    tras el login. Si quedan abiertos, bloquean la navegación a otras
+    pantallas (la SPA no procesa el cambio de ruta hasta que el modal se
+    cierre, o el modal mantiene el foco capturado).
+
+    Itera hasta 3 veces porque BCh a veces apila varios modales. Solo
+    clickea cierres adentro de overlay/modal/dialog explícitos para no
+    cerrar la sesión por accidente.
+    """
+    for attempt in range(3):
+        closed_any = False
+        for sel in SEL_POPUP_CLOSE:
+            try:
+                loc = page.locator(sel).first
+                if loc.is_visible(timeout=600):
+                    loc.click(timeout=2000)
+                    log.info(f"Popup BCh cerrado con: {sel}")
+                    page.wait_for_timeout(500)
+                    closed_any = True
+            except Exception:
+                continue
+
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(300)
+
+        # JS fallback: ocultar overlays grandes con z-index alto que tapen >15% del viewport.
+        try:
+            removed = page.evaluate("""
+                () => {
+                    let count = 0;
+                    const area = window.innerWidth * window.innerHeight;
+                    document.querySelectorAll('*').forEach(el => {
+                        if (el.tagName === 'BODY' || el.tagName === 'HTML') return;
+                        const z = parseInt(window.getComputedStyle(el).zIndex, 10);
+                        const r = el.getBoundingClientRect();
+                        if (z > 100 && r.width * r.height > area * 0.15) {
+                            el.style.display = 'none';
+                            count++;
+                        }
+                    });
+                    return count;
+                }
+            """)
+            if removed:
+                log.info(f"BCh: overlays ocultados via JS (intento {attempt+1}): {removed}")
+                page.wait_for_timeout(400)
+        except Exception:
+            pass
+
+        if not closed_any:
+            break
 
 
 def _type_human(page: Page, selectors: list[str], value: str, delay_ms: int = 90, timeout_ms: int = 5000) -> bool:
@@ -412,12 +498,20 @@ def _send_diagnostic_screenshot(page: Page, label: str) -> None:
 
 
 def fetch_movements(page: Page) -> list[dict]:
+    # Tras el login, BCh suele mostrar un popup publicitario que tapa el flujo
+    # y bloquea la navegación. Lo cerramos antes de cualquier goto.
+    log.info("Cerrando popups post-login antes de navegar a movimientos…")
+    _dismiss_popups(page)
+
     log.info("Navegando directo a saldos-movimientos de Banco de Chile…")
     page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
 
     page.wait_for_timeout(3000)
     log.info(f"BCh: URL post-goto = {page.url}")
     _log_state(page, "post-goto-movements")
+
+    # Por si aparece un segundo popup en la pantalla de movimientos.
+    _dismiss_popups(page)
 
     # Si después del goto a movs nos rebotaron a Auth0, intentar un click en
     # cualquier link "Cuentas" / "Saldos y movimientos" del menú lateral
