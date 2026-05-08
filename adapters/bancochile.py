@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from typing import Callable
+from urllib.parse import urlparse
 
 from playwright.sync_api import Page, TimeoutError as PWTimeout
 
@@ -68,10 +69,28 @@ SEL_OTP_SUBMIT = [
     'button[type="submit"]',
 ]
 
-DASHBOARD_PATTERN = re.compile(
-    r"portalpersonas\.bancochile\.cl|mibancochile",
-    re.IGNORECASE,
-)
+# OJO: NO usar un regex laxo aquí. Una URL de Auth0 como
+# `https://login.portales.bancochile.cl/authorize?...&redirect_uri=https%3A%2F%2Fportalpersonas.bancochile.cl%3A443%2F...`
+# contiene `portalpersonas.bancochile.cl` URL-encoded en los query params, y
+# un regex con `.search` matchearía dentro de los params, dando un falso
+# positivo: el adapter creería que está en el dashboard cuando en realidad
+# está en la pantalla de login. Por eso comparamos por hostname parseado.
+_DASHBOARD_HOSTS = {"portalpersonas.bancochile.cl"}
+
+
+def _is_at_dashboard(url: str) -> bool:
+    """True solo si la URL apunta al portal-personas (host real, no query params)."""
+    if not url:
+        return False
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in _DASHBOARD_HOSTS
+
+
+# Para `page.wait_for_url(...)` que acepta callable: pasamos la función misma.
+DASHBOARD_PATTERN = _is_at_dashboard
 
 
 def _log_state(page: Page, label: str) -> None:
@@ -109,14 +128,14 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
     page.wait_for_timeout(2000)
     _log_state(page, "post-goto-login")
 
-    if DASHBOARD_PATTERN.search(page.url):
+    if _is_at_dashboard(page.url):
         # La cookie del portal está vigente, pero BCh tiene cookies separadas
         # para distintos paths. Verificamos navegando a MOVEMENTS_URL.
         log.info("Sesión persistida del portal activa. Verificando acceso a movimientos…")
         page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(2500)
         _log_state(page, "post-goto-movs-from-persisted")
-        if DASHBOARD_PATTERN.search(page.url):
+        if _is_at_dashboard(page.url):
             log.info("Sesión persistida válida para movimientos. Saltando login.")
             return
         log.warning(
@@ -183,7 +202,7 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
         except PWTimeout:
             raise LoginFailed(f"Banco de Chile no llegó al dashboard tras OTP. URL: {page.url}")
 
-    if DASHBOARD_PATTERN.search(page.url):
+    if _is_at_dashboard(page.url):
         log.info(f"Login Banco de Chile OK (URL ya coincide con dashboard). URL: {page.url}")
         return
 
@@ -273,11 +292,14 @@ def _send_diagnostic_screenshot(page: Page, label: str) -> None:
     """Captura screenshot de la pantalla actual y lo manda por Telegram al chat
     autorizado. Útil para debug visual cuando un selector no aparece y los
     logs de texto no son suficientes."""
+    # Solo viewport (no full_page) — full_page suele exceder los límites de
+    # tamaño y el upload es muy lento desde Railway.
     try:
-        png = page.screenshot(full_page=True, timeout=10000)
+        png = page.screenshot(full_page=False, timeout=10000)
     except Exception as e:
         log.warning(f"No pude tomar screenshot de diagnóstico: {e}")
         return
+    log.info(f"Screenshot diag [{label}] capturado: {len(png)} bytes. Subiendo a Telegram…")
     try:
         import os
         import requests
@@ -293,7 +315,7 @@ def _send_diagnostic_screenshot(page: Page, label: str) -> None:
         }
         r = requests.post(
             f"https://api.telegram.org/bot{token}/sendPhoto",
-            data=data, files=files, timeout=30,
+            data=data, files=files, timeout=90,
         )
         if r.status_code == 200 and r.json().get("ok"):
             log.info(f"Screenshot diag [{label}] enviado a Telegram.")
