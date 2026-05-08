@@ -453,6 +453,29 @@ def set_config(key: str, value: str) -> None:
     _db().collection("config").document(key).set({"value": value, "updated_at": _now()})
 
 
+# ── browser_state (cookies de Playwright sincronizadas Mac↔Railway) ──────
+# Para BCh: no se puede hacer login fresh desde Railway porque BCh detecta
+# headless y rechaza credenciales. La estrategia: Diego logea manual desde
+# Mac con HEADLESS=false, el state queda guardado acá; Railway descarga el
+# state al inicio del scrape y lo usa sin re-login.
+
+def get_browser_state(bank: str) -> str | None:
+    """Devuelve el JSON serializado del storage_state de Playwright para `bank`,
+    o None si no hay state guardado."""
+    snap = _db().collection("browser_state").document(bank.lower()).get()
+    return snap.to_dict().get("state_json") if snap.exists else None
+
+
+def set_browser_state(bank: str, state_json: str) -> None:
+    """Guarda el storage_state JSON de Playwright. Llamar después de un login
+    exitoso para que otros procesos (Railway) puedan reusar las cookies."""
+    _db().collection("browser_state").document(bank.lower()).set({
+        "bank": bank.lower(),
+        "state_json": state_json,
+        "updated_at": _now(),
+    })
+
+
 # ── pending_corrections (Force Reply) ──────────────────────────────────────
 # Cuando el usuario apreta "✏️ Corregir", el bot manda un mensaje con
 # force_reply y guarda aquí el mapping message_id → mov_id, para que cuando

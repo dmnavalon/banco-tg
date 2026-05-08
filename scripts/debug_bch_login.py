@@ -80,6 +80,20 @@ def main() -> int:
             bancochile.login(page, rut, password)
             log.info(f"Login OK. URL final: {page.url}")
             print("\n✅ Login exitoso. Inspecciona la ventana — debería estar en el portal.")
+
+            # Persistir el state en archivo local Y sincronizar con Firestore
+            # para que Railway pueda usarlo (sin tener que re-loguear, lo cual
+            # falla en headless por anti-bot detection de BCh).
+            try:
+                state_file.parent.mkdir(parents=True, exist_ok=True)
+                context.storage_state(path=str(state_file))
+                state_json = state_file.read_text()
+                db.set_browser_state("bancochile", state_json)
+                log.info(f"State guardado local + sincronizado a Firestore.")
+                print(f"✅ State sincronizado a Firestore. Railway ahora puede usar estas cookies.")
+            except Exception as e:
+                log.warning(f"No pude guardar/subir state: {e}")
+                print(f"⚠️  State no se sincronizó a Firestore: {e}")
         except Exception as e:
             log.error(f"Login falló: {type(e).__name__}: {e}")
             print(f"\n❌ Login falló: {type(e).__name__}: {e}")

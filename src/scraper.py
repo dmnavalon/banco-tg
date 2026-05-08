@@ -53,11 +53,23 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
             "locale": "es-CL",
             "timezone_id": "America/Santiago",
         }
-        if state_file.exists():
+        # Cargar state desde Firestore primero (sincroniza Mac↔Railway). Si no
+        # hay en Firestore, fallback al archivo local (legacy, solo Mac).
+        remote_state = db.get_browser_state(bank)
+        if remote_state:
+            try:
+                json.loads(remote_state)  # validar
+                state_file.parent.mkdir(parents=True, exist_ok=True)
+                state_file.write_text(remote_state)
+                context_kwargs["storage_state"] = str(state_file)
+                log.info(f"Reusando sesión persistida desde Firestore (sync para {bank}).")
+            except Exception as e:
+                log.warning(f"State de Firestore corrupto para {bank}, ignorando: {e}")
+        elif state_file.exists():
             try:
                 json.loads(state_file.read_text())
                 context_kwargs["storage_state"] = str(state_file)
-                log.info(f"Reusando sesión persistida en {state_file.name}")
+                log.info(f"Reusando sesión persistida local en {state_file.name} (Firestore vacío).")
             except Exception:
                 log.warning(f"{state_file.name} corrupto, ignorando.")
 
@@ -66,10 +78,18 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
 
         try:
             adapter.login(page, rut, password, otp_provider)
+            # Guardar state local Y subirlo a Firestore para que el otro lado
+            # (Mac↔Railway) lo reuse sin tener que re-loguear.
             try:
                 state_file.parent.mkdir(parents=True, exist_ok=True)
                 context.storage_state(path=str(state_file))
                 log.info(f"Sesión guardada en {state_file.name}")
+                try:
+                    state_json = state_file.read_text()
+                    db.set_browser_state(bank, state_json)
+                    log.info(f"Sesión sincronizada a Firestore para {bank}.")
+                except Exception as e:
+                    log.warning(f"No pude subir state a Firestore: {e}")
             except Exception as e:
                 log.warning(f"No pude guardar storage_state: {e}")
 
