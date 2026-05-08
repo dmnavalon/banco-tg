@@ -813,7 +813,11 @@ def _send_next_page() -> None:
 
 def _resend_pending() -> None:
     try:
-        pendientes = db.get_pending()
+        # `get_all_pending` ignora el flag `notified_at` — `get_pending` solo
+        # devuelve los que no fueron notificados (utilidad del daily). En
+        # /pending queremos TODOS los que sigan en estado 'pendiente', incluso
+        # si ya los habíamos enviado a TG antes y el usuario aún no los aprobó.
+        pendientes = db.get_all_pending()
         ignoradas = db.get_ignored()
         if not pendientes and not ignoradas:
             _send("Sin pendientes ni ignoradas.")
