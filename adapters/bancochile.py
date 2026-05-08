@@ -74,6 +74,32 @@ DASHBOARD_PATTERN = re.compile(
 )
 
 
+def _log_state(page: Page, label: str) -> None:
+    """Helper de diagnóstico: loguea URL actual + presencia de campos clave."""
+    try:
+        diag = page.evaluate("""
+            () => ({
+                url: window.location.href,
+                title: document.title,
+                rut_input: !!document.querySelector('#ppriv_per-login-click-input-rut'),
+                pass_input: !!document.querySelector('#ppriv_per-login-click-input-password'),
+                submit_btn: !!document.querySelector('#ppriv_per-login-click-ingresar-login'),
+                bch_table: !!document.querySelector('table.bch-table'),
+                forms: document.querySelectorAll('form').length,
+                visible_text: (document.body ? document.body.innerText : '').slice(0, 200).replace(/\\s+/g, ' '),
+            })
+        """)
+        log.info(
+            f"BCh state [{label}]: url={diag.get('url')!r} "
+            f"title={diag.get('title')!r} "
+            f"rut_input={diag.get('rut_input')} pass_input={diag.get('pass_input')} "
+            f"submit_btn={diag.get('submit_btn')} bch_table={diag.get('bch_table')} "
+            f"forms={diag.get('forms')} text={diag.get('visible_text')!r}"
+        )
+    except Exception as e:
+        log.warning(f"BCh state [{label}]: no pude inspeccionar página ({e})")
+
+
 def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str] | None = None) -> None:
     if len(password) > 8:
         raise LoginFailed("La clave de Banco de Chile no puede tener más de 8 caracteres.")
@@ -81,49 +107,69 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
     log.info("Navegando al login de Banco de Chile…")
     page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_timeout(2000)
+    _log_state(page, "post-goto-login")
 
     if DASHBOARD_PATTERN.search(page.url):
         # La cookie del portal está vigente, pero BCh tiene cookies separadas
-        # para distintos paths. La sesión home puede ser válida y la de
-        # movimientos no. Verificamos navegando a MOVEMENTS_URL: si nos rebota
-        # a Auth0 (login.portales.bancochile.cl), la sesión persistida expiró
-        # y hay que re-loguear con RUT/clave.
+        # para distintos paths. Verificamos navegando a MOVEMENTS_URL.
         log.info("Sesión persistida del portal activa. Verificando acceso a movimientos…")
         page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(2500)
+        _log_state(page, "post-goto-movs-from-persisted")
         if DASHBOARD_PATTERN.search(page.url):
             log.info("Sesión persistida válida para movimientos. Saltando login.")
             return
         log.warning(
             f"Sesión persistida expiró al navegar a movimientos (URL: {page.url}). "
-            f"Re-logueando con credenciales."
+            f"Limpiando cookies y re-logueando con credenciales."
         )
+        # La doble validación detectó sesión inválida. Limpiar TODO el storage
+        # antes del re-login para evitar que el form arrastre estado viejo
+        # (inputs auto-rellenados, error messages residuales, etc.).
+        try:
+            page.context.clear_cookies()
+            log.info("Cookies del contexto limpiadas para forzar login fresh.")
+        except Exception as e:
+            log.warning(f"No pude limpiar cookies: {e}")
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
-        page.wait_for_timeout(2000)
+        page.wait_for_timeout(2500)
+        _log_state(page, "post-goto-login-fresh")
 
     if any_present(page, SEL_CAPTCHA_FILLED, timeout_ms=2000):
         raise CaptchaPresent("Banco de Chile está mostrando un captcha. Login automático abortado.")
 
+    log.info(f"Llenando RUT… (selectores: {SEL_RUT})")
     if not fill_first(page, SEL_RUT, rut):
+        _log_state(page, "fail-rut")
         raise ScraperBroken("No encontré el campo RUT en Banco de Chile.")
+    log.info("RUT llenado OK.")
+
+    log.info(f"Llenando clave… (selectores: {SEL_PASS})")
     if not fill_first(page, SEL_PASS, password):
+        _log_state(page, "fail-pass")
         raise ScraperBroken("No encontré el campo de clave en Banco de Chile.")
+    log.info("Clave llenada OK.")
 
     if any_present(page, SEL_CAPTCHA_FILLED, timeout_ms=1500):
         raise CaptchaPresent("Banco de Chile mostró captcha tras llenar el form.")
 
+    log.info(f"Click submit… (selectores: {SEL_SUBMIT})")
     if not click_first(page, SEL_SUBMIT):
+        _log_state(page, "fail-submit")
         raise ScraperBroken("No pude clickear el botón Ingresar de Banco de Chile.")
+    log.info("Submit clickeado, esperando dashboard…")
 
     try:
         page.wait_for_url(DASHBOARD_PATTERN, timeout=20000)
-        log.info("Login Banco de Chile OK (sin 2FA).")
+        log.info(f"Login Banco de Chile OK (sin 2FA). URL: {page.url}")
         return
     except PWTimeout:
-        pass
+        log.warning(f"No llegó al dashboard en 20s tras submit. URL: {page.url}")
+        _log_state(page, "post-submit-no-dashboard")
 
     otp_input = first_visible(page, SEL_OTP_INPUT, timeout_ms=3000)
     if otp_input:
+        log.info("OTP input detectado, pidiendo 2FA al usuario.")
         if otp_provider is None:
             raise TwoFARequired("Banco de Chile pide 2FA y no hay otp_provider configurado.")
         code = otp_provider("bancochile")
@@ -132,13 +178,13 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
             raise ScraperBroken("No encontré botón para confirmar el OTP en Banco de Chile.")
         try:
             page.wait_for_url(DASHBOARD_PATTERN, timeout=20000)
-            log.info("Login Banco de Chile OK con 2FA.")
+            log.info(f"Login Banco de Chile OK con 2FA. URL: {page.url}")
             return
         except PWTimeout:
-            raise LoginFailed("Banco de Chile no llegó al dashboard tras OTP.")
+            raise LoginFailed(f"Banco de Chile no llegó al dashboard tras OTP. URL: {page.url}")
 
     if DASHBOARD_PATTERN.search(page.url):
-        log.info("Login Banco de Chile OK (URL ya coincide con dashboard).")
+        log.info(f"Login Banco de Chile OK (URL ya coincide con dashboard). URL: {page.url}")
         return
 
     raise LoginFailed(f"Banco de Chile no avanzó al dashboard tras login. URL actual: {page.url}")
@@ -223,23 +269,65 @@ def _go_to_next_page(page: Page) -> bool:
         return False
 
 
+def _send_diagnostic_screenshot(page: Page, label: str) -> None:
+    """Captura screenshot de la pantalla actual y lo manda por Telegram al chat
+    autorizado. Útil para debug visual cuando un selector no aparece y los
+    logs de texto no son suficientes."""
+    try:
+        png = page.screenshot(full_page=True, timeout=10000)
+    except Exception as e:
+        log.warning(f"No pude tomar screenshot de diagnóstico: {e}")
+        return
+    try:
+        import os
+        import requests
+        token = os.environ.get("TG_BOT_TOKEN", "").strip()
+        chat_id = os.environ.get("TG_CHAT_ID", "").strip()
+        if not token or not chat_id:
+            log.warning("Sin TG_BOT_TOKEN/TG_CHAT_ID; salto envío de screenshot diag.")
+            return
+        files = {"photo": (f"bch-diag-{label}.png", png, "image/png")}
+        data = {
+            "chat_id": chat_id,
+            "caption": f"🔍 BCh diag [{label}] · URL: {page.url[:200]}",
+        }
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendPhoto",
+            data=data, files=files, timeout=30,
+        )
+        if r.status_code == 200 and r.json().get("ok"):
+            log.info(f"Screenshot diag [{label}] enviado a Telegram.")
+        else:
+            log.warning(f"sendPhoto diag falló: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        log.warning(f"Error enviando screenshot diag: {e}")
+
+
 def fetch_movements(page: Page) -> list[dict]:
     log.info("Navegando directo a saldos-movimientos de Banco de Chile…")
     page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
 
-    # Algunos navegadores no procesan el hash `#/.../saldos-movimientos/` si el
-    # cliente de Angular ya estaba en otra ruta. Damos un nudge y verificamos.
     page.wait_for_timeout(3000)
     log.info(f"BCh: URL post-goto = {page.url}")
+    _log_state(page, "post-goto-movements")
 
-    # La SPA carga async. Esperamos a que aparezca al menos una fila real
-    # (no una table-collapse-row, esas son filas-fantasma de animación).
+    # Si después del goto a movs nos rebotaron a Auth0, intentar un click en
+    # cualquier link "Cuentas" / "Saldos y movimientos" del menú lateral
+    # antes de rendirse — algunos flujos requieren navegación click-driven.
+    if "login.portales.bancochile.cl" in page.url or "/authorize" in page.url:
+        log.warning(f"BCh: post-goto-movements URL en Auth0 ({page.url}). Sesión efectivamente expiró aquí.")
+        _send_diagnostic_screenshot(page, "rebote-auth0")
+        raise ScraperBroken(
+            f"BCh nos rebotó a Auth0 al ir a saldos-movimientos (URL: {page.url}). "
+            f"La sesión del segundo nivel sigue inválida incluso tras login fresh — "
+            f"probable token JWT que requiere step-up auth o navegación click-driven desde el menú."
+        )
+
+    # La SPA carga async. Esperamos a que aparezca al menos una fila real.
     try:
         page.wait_for_selector(SEL_TABLE_ROW, state="attached", timeout=40000)
         page.wait_for_timeout(2000)
     except PWTimeout:
-        # Diagnóstico para entender dónde quedó la página: URL final,
-        # tablas presentes (con clase y filas), y headings visibles.
         try:
             diag = page.evaluate("""
                 () => {
@@ -263,6 +351,8 @@ def fetch_movements(page: Page) -> list[dict]:
             log.warning(f"BCh diag botones visibles: {diag.get('buttons')}")
         except Exception as diag_err:
             log.warning(f"BCh: no pude obtener diagnóstico de la página: {diag_err}")
+        # Mandar screenshot al usuario para diagnóstico visual.
+        _send_diagnostic_screenshot(page, "no-tabla")
         raise ScraperBroken(
             f"No encontré tabla de movimientos en Banco de Chile (URL final: {page.url})."
         )
