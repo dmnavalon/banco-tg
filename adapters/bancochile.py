@@ -574,13 +574,33 @@ def fetch_movements(page: Page) -> list[dict]:
                         .filter(b => b.offsetParent !== null)
                         .map(b => b.textContent.trim().slice(0, 40))
                         .filter(t => t.length > 0).slice(0, 12);
-                    return { url: window.location.href, headings, tables, buttons };
+                    // Diagnóstico extra: ver si la app Angular bootea o no.
+                    const bodyChildren = document.body ? document.body.children.length : 0;
+                    const bodyText = (document.body ? document.body.innerText : '').slice(0, 300);
+                    const bodyHTML = (document.body ? document.body.innerHTML : '').slice(0, 500);
+                    const appRoot = !!document.querySelector('app-root, app-saldos-movimientos, [class*="bch-"]');
+                    const angular = !!window.ng || !!window.getAllAngularRootElements;
+                    return {
+                        url: window.location.href,
+                        headings,
+                        tables,
+                        buttons,
+                        body_children: bodyChildren,
+                        body_text: bodyText,
+                        body_html_preview: bodyHTML,
+                        has_app_root: appRoot,
+                        has_angular_global: angular,
+                    };
                 }
             """)
             log.warning(f"BCh diag URL: {diag.get('url')!r}")
             log.warning(f"BCh diag headings: {diag.get('headings')}")
             log.warning(f"BCh diag tables: {diag.get('tables')}")
             log.warning(f"BCh diag botones visibles: {diag.get('buttons')}")
+            log.warning(f"BCh diag body children count: {diag.get('body_children')}")
+            log.warning(f"BCh diag body text preview: {diag.get('body_text')!r}")
+            log.warning(f"BCh diag body html preview: {diag.get('body_html_preview')!r}")
+            log.warning(f"BCh diag has_app_root: {diag.get('has_app_root')} has_angular_global: {diag.get('has_angular_global')}")
         except Exception as diag_err:
             log.warning(f"BCh: no pude obtener diagnóstico de la página: {diag_err}")
         # Mandar screenshot al usuario para diagnóstico visual.
