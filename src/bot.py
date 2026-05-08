@@ -520,24 +520,9 @@ def _handle_greeting() -> None:
         n = len(rows)
         plural = "s" if n != 1 else ""
         _send(f"👋 Hola, Diego.\n\nTienes {n} movimiento{plural} pendiente{plural} de revisión:")
-        movs = [
-            {
-                "id": r["id"],
-                "date": r.get("date", ""),
-                "description": r.get("description", ""),
-                "amount": r.get("amount", 0),
-                "bank": r.get("bank", ""),
-                "suggested_category": r.get("suggested_category"),
-                "suggested_subcategory": r.get("suggested_subcategory"),
-                "confidence": r.get("confidence") or 0.0,
-                "comercio": r.get("comercio"),
-                "tipo": r.get("tipo") or "Egreso",
-                "requiere_revision": r.get("requiere_revision", False),
-                "pregunta_sugerida": r.get("pregunta_sugerida"),
-            }
-            for r in rows
-        ]
-        telegram_notify.send_movement_cards(movs)
+        # Pasamos los dicts de Firestore tal cual para conservar tg_photo_file_id,
+        # persona, y otros campos opcionales que la tarjeta usa.
+        telegram_notify.send_movement_cards(list(rows))
     except Exception as e:
         db.record_error("bot.greeting", str(e), traceback.format_exc())
         _send(f"Error al consultar pendientes: {type(e).__name__}: {e}")
@@ -610,23 +595,10 @@ def _resend_pending() -> None:
         if not rows:
             _send("Sin pendientes.")
             return
-        movs = []
-        for r in rows:
-            movs.append({
-                "id": r["id"],
-                "date": r["date"],
-                "description": r["description"],
-                "amount": r["amount"],
-                "bank": r["bank"],
-                "suggested_category": r["suggested_category"],
-                "suggested_subcategory": r["suggested_subcategory"],
-                "confidence": r["confidence"] or 0.0,
-                "comercio": r.get("comercio"),
-                "tipo": r.get("tipo") or "Egreso",
-                "requiere_revision": r.get("requiere_revision", False),
-                "pregunta_sugerida": r.get("pregunta_sugerida"),
-            })
-        telegram_notify.send_daily_batch(movs)
+        # Reusamos el dict completo de Firestore para que `send_movement_cards`
+        # tenga acceso a tg_photo_file_id, persona, y cualquier campo nuevo que
+        # se agregue al modelo en el futuro sin tener que actualizar este loop.
+        telegram_notify.send_daily_batch(list(rows))
     except Exception as e:
         db.record_error("bot.pending", str(e), traceback.format_exc())
         _send(f"Error reenviando pendientes: {type(e).__name__}: {e}")
