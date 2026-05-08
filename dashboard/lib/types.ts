@@ -19,12 +19,20 @@ export interface Movimiento {
   banco: string;
   persona: string;
   descripcion: string;
+  /** Monto total de la compra original en moneda original (sin convertir). Para compras en cuotas, es el total. */
   monto: number;
+  /** Monto total convertido a CLP. */
   montoCLP: number;
+  /** Monto efectivo del mes en CLP: si está en cuotas, la cuota mensual; si no, el monto total.
+   * Esta es la cifra que representa la salida real de caja del mes y la que usan los KPIs de gasto. */
+  montoMesCLP: number;
   tipo: "Abono" | "Cargo" | "";
   saldo: number | null;
   categoria: string;
   subcategoria: string;
+  cuotaActual: number | null;
+  cuotasTotal: number | null;
+  cuotaAPagar: number | null;
   moneda: Moneda;
   esencial: boolean;
   fijo: boolean;

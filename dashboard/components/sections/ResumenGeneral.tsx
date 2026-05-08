@@ -63,11 +63,11 @@ export function ResumenGeneralSection({ kpis, onKpiClick }: { kpis: DashboardKPI
               </p>
               <ul className="mt-1.5 ml-4 list-disc space-y-0.5">
                 <li><b>Ingresos</b>: Σ movs con tipoMovimiento=Ingreso (sin internos).</li>
-                <li><b>Gastos</b>: Σ movs con tipoMovimiento=GastoReal.</li>
+                <li><b>Gastos</b>: Σ movs con tipoMovimiento=GastoReal usando el monto del mes (Cuota a pagar si está en cuotas, monto total si no).</li>
                 <li><b>Flujo libre</b>: Ingresos − Gastos − Pagos de deuda.</li>
               </ul>
               <p className="mt-2 text-[10px] italic text-zinc-400">
-                Movimientos con flag Excluido=TRUE no se cuentan.
+                Movs con Excluido=TRUE no se cuentan. Las compras en cuotas se computan en el mes que sale la cuota, no en el mes de la compra.
               </p>
             </>
           }

@@ -41,12 +41,13 @@ export function GastosSection({ kpis }: { kpis: DashboardKPIs }) {
                   <>
                     <p className="font-semibold text-zinc-700 dark:text-zinc-300">Cómo se calcula</p>
                     <p className="mt-1 leading-relaxed">
-                      Σ movimientos del mes con tipoMovimiento=GastoReal, agrupados por
-                      Categoría. Excluye movimientos internos (transferencias, pago de
-                      tarjeta) y movimientos con Excluido=TRUE.
+                      Σ del monto efectivo del mes (Cuota a pagar si está en cuotas,
+                      monto total si no) de los movs con tipoMovimiento=GastoReal,
+                      agrupados por Categoría. Excluye internos (transferencias, pago
+                      de TC) y con Excluido=TRUE.
                     </p>
                     <p className="mt-2 text-[10px] uppercase tracking-wide text-zinc-400">Color de barra</p>
-                    <p>Azul = categoría marcada como Esencial en TaxonomíaExtendida. Naranja = Discrecional.</p>
+                    <p>Azul = Esencial en TaxonomíaExtendida. Naranja = Discrecional.</p>
                   </>
                 }
               />

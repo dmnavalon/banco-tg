@@ -67,9 +67,9 @@ export function DetalleKpiPanel({
 
   const csvHref = (() => {
     if (movs.length === 0) return null;
-    const header = "Fecha,Banco,Persona,Descripción,Monto,Moneda,MontoCLP,Categoría,Subcategoría,Esencial,Fijo,Recurrente,TipoMovimiento\n";
+    const header = "Fecha,Banco,Persona,Descripción,Monto,Moneda,MontoCLP,MontoMesCLP,CuotaActual,CuotasTotal,CuotaAPagar,Categoría,Subcategoría,Esencial,Fijo,Recurrente,TipoMovimiento\n";
     const rows = movs.map((m) =>
-      [m.fechaISO, m.banco, m.persona, `"${m.descripcion.replace(/"/g, "''")}"`, m.monto, m.moneda, m.montoCLP, m.categoria, m.subcategoria, m.esencial, m.fijo, m.recurrente, m.tipoMovimiento].join(","),
+      [m.fechaISO, m.banco, m.persona, `"${m.descripcion.replace(/"/g, "''")}"`, m.monto, m.moneda, m.montoCLP, m.montoMesCLP, m.cuotaActual ?? "", m.cuotasTotal ?? "", m.cuotaAPagar ?? "", m.categoria, m.subcategoria, m.esencial, m.fijo, m.recurrente, m.tipoMovimiento].join(","),
     );
     return "data:text/csv;charset=utf-8," + encodeURIComponent(header + rows.join("\n"));
   })();
@@ -249,25 +249,42 @@ export function DetalleKpiPanel({
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-zinc-100 dark:divide-zinc-800">
-                      {movs.map((m) => (
-                        <tr key={m.idx} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/50">
-                          <td className="whitespace-nowrap px-2 py-1.5 text-zinc-500">
-                            <Calendar className="mr-1 inline h-3 w-3" />
-                            {m.fechaISO}
-                          </td>
-                          <td className="px-2 py-1.5">
-                            <p className="max-w-[16ch] truncate font-medium text-zinc-700 dark:text-zinc-300" title={m.descripcion}>
-                              {m.descripcion}
-                            </p>
-                            <p className="text-[10px] text-zinc-400">{m.banco} · {m.persona}</p>
-                          </td>
-                          <td className="px-2 py-1.5 text-zinc-500">
-                            <p>{m.categoria}</p>
-                            {m.subcategoria && <p className="text-[10px] text-zinc-400">{m.subcategoria}</p>}
-                          </td>
-                          <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">{formatCLP(Math.abs(m.montoCLP))}</td>
-                        </tr>
-                      ))}
+                      {movs.map((m) => {
+                        const enCuotas = m.cuotasTotal !== null && m.cuotasTotal > 1;
+                        const montoEfectivo = Math.abs(m.montoMesCLP);
+                        const montoTotal = Math.abs(m.montoCLP);
+                        return (
+                          <tr key={m.idx} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/50">
+                            <td className="whitespace-nowrap px-2 py-1.5 text-zinc-500">
+                              <Calendar className="mr-1 inline h-3 w-3" />
+                              {m.fechaISO}
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <p className="max-w-[16ch] truncate font-medium text-zinc-700 dark:text-zinc-300" title={m.descripcion}>
+                                {m.descripcion}
+                              </p>
+                              <p className="text-[10px] text-zinc-400">
+                                {m.banco} · {m.persona}
+                                {enCuotas && (
+                                  <span className="ml-1 inline-flex items-center rounded bg-blue-50 px-1 py-px text-[9px] font-medium text-blue-700 dark:bg-blue-950/40 dark:text-blue-300">
+                                    Cuota {m.cuotaActual ?? "?"}/{m.cuotasTotal}
+                                  </span>
+                                )}
+                              </p>
+                            </td>
+                            <td className="px-2 py-1.5 text-zinc-500">
+                              <p>{m.categoria}</p>
+                              {m.subcategoria && <p className="text-[10px] text-zinc-400">{m.subcategoria}</p>}
+                            </td>
+                            <td className="whitespace-nowrap px-2 py-1.5 text-right tabular-nums">
+                              <p className="text-zinc-900 dark:text-zinc-50">{formatCLP(montoEfectivo)}</p>
+                              {enCuotas && (
+                                <p className="text-[10px] text-zinc-400">de {formatCLP(montoTotal)} total</p>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>

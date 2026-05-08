@@ -30,10 +30,13 @@ const isPagoDeuda = (m: Movimiento): boolean =>
 const isAhorroOInversion = (m: Movimiento): boolean =>
   isOperativo(m) && (m.tipoMovimiento === "Ahorro" || m.tipoMovimiento === "AporteInversión");
 
+/** Egreso del MES en curso. Para compras en cuotas, esta es la cuota mensual,
+ * no el total de la compra. Esto da el flujo de caja real del mes. */
 function montoEgreso(m: Movimiento): number {
-  return Math.abs(m.montoCLP);
+  return Math.abs(m.montoMesCLP);
 }
 
+/** Ingreso completo del mes (no aplica concepto de cuotas a ingresos). */
 function montoIngreso(m: Movimiento): number {
   return Math.abs(m.montoCLP);
 }
@@ -273,7 +276,7 @@ function calcResumen(
       nombre: "Gastos totales del mes",
       valor: gastosTotales,
       formato: "CLP",
-      formula: `Σ movimientos del mes ${mesActual} con tipoMovimiento=GastoReal, excluyendo movimientos internos, pagos de tarjeta y excluidos. ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos sumados.`,
+      formula: `Σ del MontoMesCLP de los ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos del mes ${mesActual} con tipoMovimiento=GastoReal (excluye movs internos, pagos de TC y excluidos). Para compras en cuotas, suma la cuota del mes (Cuota a pagar) y no el total de la compra — eso refleja el flujo de caja real del mes.`,
       breakdownIdxs: aggMes?.gastosRealesIdxs,
       comparaciones: gastosTotales !== null ? comparacionesContra(gastosTotales, agregados, mesActual, "gastosReales") : undefined,
     }),

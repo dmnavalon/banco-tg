@@ -29,11 +29,18 @@ load_dotenv(ROOT / ".env")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = "1bcH0Hu2_z_yVxZY3BuTkGaDzlsQQZYRCD1ayY-Pb6XM"
 
-# 8 columnas nuevas a agregar a Movimientos (después de la 13)
+# Header oficial post-migración 2026-05-08: 24 columnas.
+# Las primeras 13 las escribe el bot (gsheet.py). Las cols 14-16 (Cuota actual,
+# Cuotas total, Cuota a pagar) las llena también el bot cuando hay info de cuotas.
+# Las cols 17-24 (Q-X) las gestiona este script y se rellenan automáticamente
+# vía fórmulas/defaults para soportar el dashboard.
 MOVIMIENTOS_NUEVAS_COL = [
     "Moneda", "MontoCLP", "Esencial", "Fijo", "Recurrente",
     "Extraordinario", "Excluido", "Notas",
 ]
+# Rango donde viven esas 8 cols (post-migración)
+DASH_COLS_START = "Q"  # 17
+DASH_COLS_END = "X"    # 24
 
 TAXONOMIA_HEADER = [
     "Categoría", "Subcategoría", "Esencial", "Fijo",
@@ -122,7 +129,15 @@ def setup_taxonomia(sh: gspread.Spreadsheet) -> None:
 
 
 def extend_movimientos(sh: gspread.Spreadsheet) -> None:
-    """Agrega cols 14-21 a Movimientos + backfill (Moneda=CLP, MontoCLP=Monto, fórmulas VLOOKUP)."""
+    """Asegura que Movimientos tenga las 8 columnas Q-X del dashboard con sus fórmulas.
+    Idempotente: si ya están presentes y bien formadas, no hace nada.
+
+    Layout post-migración 2026-05-08 (24 col):
+      A-M (1-13): bot · escribe bot.py / gsheet.py
+      N-P (14-16): Cuota actual, Cuotas total, Cuota a pagar (las llena el bot)
+      Q-X (17-24): este script · Moneda, MontoCLP, Esencial, Fijo, Recurrente,
+                   Extraordinario, Excluido, Notas
+    """
     ws = sh.worksheet("Movimientos")
     rows = ws.get_all_values()
     if not rows:
@@ -130,16 +145,22 @@ def extend_movimientos(sh: gspread.Spreadsheet) -> None:
         return
 
     header = rows[0]
-    if len(header) >= 21 and header[13:21] == MOVIMIENTOS_NUEVAS_COL:
-        print("  → headers extendidos ya presentes — skip")
+    expected_q_x = MOVIMIENTOS_NUEVAS_COL
+    actual_q_x = header[16:24] if len(header) >= 24 else []
+    if actual_q_x == expected_q_x:
+        print("  → headers Q-X ya presentes — skip header write")
     else:
-        if ws.col_count < 21:
-            ws.resize(rows=ws.row_count, cols=max(21, ws.col_count))
-        ws.update("N1:U1", [MOVIMIENTOS_NUEVAS_COL], value_input_option="USER_ENTERED")
-        ws.format("N1:U1", {"textFormat": {"bold": True}})
-        print("  ✓ headers 14-21 escritos en Movimientos")
+        if ws.col_count < 24:
+            ws.resize(rows=ws.row_count, cols=max(24, ws.col_count))
+        ws.update(range_name=f"{DASH_COLS_START}1:{DASH_COLS_END}1",
+                  values=[MOVIMIENTOS_NUEVAS_COL], value_input_option="USER_ENTERED")
+        ws.format(f"{DASH_COLS_START}1:{DASH_COLS_END}1", {"textFormat": {"bold": True}})
+        print(f"  ✓ headers {DASH_COLS_START}-{DASH_COLS_END} escritos en Movimientos")
 
-    # Backfill: una fila por movimiento existente
+    # Backfill: una fila por movimiento existente.
+    # OJO: estas fórmulas NO se sobrescriben en filas que ya tienen valores —
+    # GSheet propaga las fórmulas a filas nuevas via auto-fill, así que solo
+    # backfilleamos al setup inicial.
     n = len(rows) - 1
     if n <= 0:
         print("  → sin filas de data para backfill")
@@ -148,19 +169,24 @@ def extend_movimientos(sh: gspread.Spreadsheet) -> None:
     # Para Esencial/Fijo: VLOOKUP a TaxonomíaExtendida (col 3 y 4 respectivamente).
     # Para MontoCLP: si Moneda=CLP entonces Monto; sino, Monto * VLOOKUP a TipoCambio
     # (con IFERROR para que funcione antes de crear TipoCambio).
+    # Referencias post-migración:
+    #   $I{i} = Monto (sin cambio)
+    #   $L{i} = Categoría (sin cambio)
+    #   $Q{i} = Moneda (era $N{i} pre-migración)
     backfill = []
     for i, _ in enumerate(rows[1:], start=2):
         backfill.append([
-            "CLP",                                                                    # N: Moneda
-            f'=IF($N{i}="CLP", $I{i}, IFERROR($I{i}*VLOOKUP($N{i},TipoCambio!$B:$C,2,FALSE), $I{i}))',  # O: MontoCLP
-            f'=IFERROR(VLOOKUP($L{i},TaxonomíaExtendida!$A:$F,3,FALSE), "FALSE")',     # P: Esencial
-            f'=IFERROR(VLOOKUP($L{i},TaxonomíaExtendida!$A:$F,4,FALSE), "FALSE")',     # Q: Fijo
-            "FALSE",                                                                  # R: Recurrente (manual o detectado)
-            "FALSE",                                                                  # S: Extraordinario
-            "FALSE",                                                                  # T: Excluido
-            "",                                                                       # U: Notas
+            "CLP",                                                                                          # Q: Moneda
+            f'=IF($Q{i}="CLP", $I{i}, IFERROR($I{i}*VLOOKUP($Q{i},TipoCambio!$B:$C,2,FALSE), $I{i}))',     # R: MontoCLP
+            f'=IFERROR(VLOOKUP($L{i},TaxonomíaExtendida!$A:$F,3,FALSE), "FALSE")',                          # S: Esencial
+            f'=IFERROR(VLOOKUP($L{i},TaxonomíaExtendida!$A:$F,4,FALSE), "FALSE")',                          # T: Fijo
+            "FALSE",                                                                                        # U: Recurrente
+            "FALSE",                                                                                        # V: Extraordinario
+            "FALSE",                                                                                        # W: Excluido
+            "",                                                                                             # X: Notas
         ])
-    ws.update(f"N2:U{n+1}", backfill, value_input_option="USER_ENTERED")
+    ws.update(range_name=f"{DASH_COLS_START}2:{DASH_COLS_END}{n+1}",
+              values=backfill, value_input_option="USER_ENTERED")
     print(f"  ✓ backfill aplicado a {n} filas")
 
 

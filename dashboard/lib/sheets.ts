@@ -87,7 +87,20 @@ function asTipoMovimiento(s: string): TipoMovimiento {
 }
 
 async function readMovimientos(taxonomia: TaxonomiaRow[]): Promise<Movimiento[]> {
-  const rows = await readRange("Movimientos!A2:U");
+  // Header oficial 24 col post-migración 2026-05-08:
+  //  A=0  Fecha           M=12 Subcategoría        S=18 Esencial
+  //  B=1  Día             N=13 Cuota actual        T=19 Fijo
+  //  C=2  Mes             O=14 Cuotas total        U=20 Recurrente
+  //  D=3  Año             P=15 Cuota a pagar       V=21 Extraordinario
+  //  E=4  Día Semana      Q=16 Moneda              W=22 Excluido
+  //  F=5  Banco           R=17 MontoCLP            X=23 Notas
+  //  G=6  Persona
+  //  H=7  Descripción
+  //  I=8  Monto
+  //  J=9  Tipo
+  //  K=10 Saldo
+  //  L=11 Categoría
+  const rows = await readRange("Movimientos!A2:X");
   const taxIndex = new Map<string, TaxonomiaRow>();
   for (const t of taxonomia) {
     taxIndex.set(t.categoria, t);
@@ -100,17 +113,36 @@ async function readMovimientos(taxonomia: TaxonomiaRow[]): Promise<Movimiento[]>
       const fecha = parseChileanDate(fechaISO) ?? new Date(0);
       const categoria = String(r[11] || "").trim();
       const subcategoria = String(r[12] || "").trim();
-      const moneda = asMoneda(String(r[13] || "CLP"));
+
+      // Cuotas
+      const cuotaActualRaw = r[13];
+      const cuotasTotalRaw = r[14];
+      const cuotaAPagarRaw = r[15];
+      const cuotaActual = cuotaActualRaw && String(cuotaActualRaw).trim() !== "" ? parseNumber(cuotaActualRaw) : null;
+      const cuotasTotal = cuotasTotalRaw && String(cuotasTotalRaw).trim() !== "" ? parseNumber(cuotasTotalRaw) : null;
+      const cuotaAPagar = cuotaAPagarRaw && String(cuotaAPagarRaw).trim() !== "" ? parseNumber(cuotaAPagarRaw) : null;
+
+      const moneda = asMoneda(String(r[16] || "CLP"));
       const monto = parseNumber(r[8]);
-      const montoCLP = parseNumber(r[14]) || monto;
+      const montoCLP = parseNumber(r[17]) || monto;
       const tipoStr = String(r[9] || "");
 
+      // Monto efectivo del mes:
+      //   Si Cuotas total > 1 → cuotaAPagar (si existe) o montoCLP/cuotasTotal (aproximación).
+      //   Si no → montoCLP.
+      const montoMesCLP =
+        cuotasTotal && cuotasTotal > 1
+          ? cuotaAPagar !== null
+            ? cuotaAPagar
+            : montoCLP / cuotasTotal
+          : montoCLP;
+
       const tax = taxIndex.get(categoria);
-      const esencial = parseBool(r[15]) || (tax?.esencial ?? false);
-      const fijo = parseBool(r[16]) || (tax?.fijo ?? false);
-      const recurrente = parseBool(r[17]);
-      const extraordinario = parseBool(r[18]);
-      const excluido = parseBool(r[19]);
+      const esencial = parseBool(r[18]) || (tax?.esencial ?? false);
+      const fijo = parseBool(r[19]) || (tax?.fijo ?? false);
+      const recurrente = parseBool(r[20]);
+      const extraordinario = parseBool(r[21]);
+      const excluido = parseBool(r[22]);
       const tipoMovimiento = tax?.tipoMovimiento ?? (tipoStr === "Abono" ? "Ingreso" : "GastoReal");
 
       return {
@@ -122,17 +154,21 @@ async function readMovimientos(taxonomia: TaxonomiaRow[]): Promise<Movimiento[]>
         descripcion: String(r[7] || ""),
         monto,
         montoCLP,
+        montoMesCLP,
         tipo: (tipoStr === "Abono" || tipoStr === "Cargo") ? tipoStr : "",
         saldo: r[10] ? parseNumber(r[10]) : null,
         categoria,
         subcategoria,
+        cuotaActual,
+        cuotasTotal,
+        cuotaAPagar,
         moneda,
         esencial,
         fijo,
         recurrente,
         extraordinario,
         excluido,
-        notas: String(r[20] || ""),
+        notas: String(r[23] || ""),
         tipoMovimiento,
       };
     });
