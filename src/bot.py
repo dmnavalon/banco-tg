@@ -827,12 +827,20 @@ def _resend_pending() -> None:
         # lo que pediste: si hay 3 pendientes y N ignoradas, la primera tanda
         # de 5 son [3 pendientes, 2 ignoradas].
         movs = list(pendientes) + list(ignoradas)
-        # Clasificar on-demand los que quedaron sin categoría.
+        # Clasificar on-demand los que quedaron sin categoría (puede mandar
+        # un mensaje "⏳ Clasificando N..." si hay >5).
         _ensure_classified(movs)
+        # Mensaje de intro siempre, así sabés cuántos vienen antes de que
+        # empiecen a llegar las tarjetas.
         if pendientes and ignoradas:
-            _send(f"📋 {len(pendientes)} pendientes + {len(ignoradas)} ignoradas en cola.")
-        elif ignoradas:
-            _send(f"Sin pendientes nuevos. Reenviando {len(ignoradas)} ignoradas (por si querés re-categorizarlas).")
+            intro = f"📋 {len(pendientes)} pendientes + {len(ignoradas)} ignoradas en cola."
+        elif pendientes:
+            plural = "s" if len(pendientes) != 1 else ""
+            intro = f"📋 {len(pendientes)} pendiente{plural} en cola."
+        else:
+            plural = "s" if len(ignoradas) != 1 else ""
+            intro = f"📋 Sin pendientes nuevos. Reenviando {len(ignoradas)} ignorada{plural} (por si querés re-categorizarlas)."
+        _send(intro)
         telegram_notify.send_daily_batch(movs)
     except Exception as e:
         db.record_error("bot.pending", str(e), traceback.format_exc())
