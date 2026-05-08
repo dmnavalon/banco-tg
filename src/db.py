@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 from typing import Any
 
+# gRPC se ensucia con FDs heredados cuando Playwright forkea procesos hijos
+# (Chromium). Síntoma: `DeadlineExceeded: 504` aleatorio en operaciones Firestore
+# durante/después del scrape. Las env vars hay que setearlas ANTES del import
+# de firebase_admin/google.cloud porque grpc.aio inicializa estructuras al
+# load-time según ellas.
+os.environ.setdefault("GRPC_ENABLE_FORK_SUPPORT", "1")
+os.environ.setdefault("GRPC_POLL_STRATEGY", "poll")
+
 import firebase_admin
 from firebase_admin import credentials, firestore as fstore
+from google.api_core import exceptions as gax_exceptions
 
 _client: Any = None
 
@@ -35,6 +45,37 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+_TRANSIENT_GRPC = (
+    gax_exceptions.DeadlineExceeded,
+    gax_exceptions.ServiceUnavailable,
+    gax_exceptions.Aborted,
+    gax_exceptions.InternalServerError,
+    gax_exceptions.RetryError,
+)
+
+
+def _with_retry(fn, *, max_attempts: int = 3, base_delay: float = 1.5):
+    """Reintenta una operación contra Firestore ante errores transient gRPC.
+    No es un decorador para mantener el callsite simple — se llama como
+    `_with_retry(lambda: ref.set(data))`."""
+    last_exc: Exception | None = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except _TRANSIENT_GRPC as e:
+            last_exc = e
+            if attempt == max_attempts:
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            import logging
+            logging.getLogger("db").warning(
+                f"Firestore transient ({type(e).__name__}); retry {attempt}/{max_attempts} en {delay:.1f}s"
+            )
+            time.sleep(delay)
+    if last_exc:
+        raise last_exc
+
+
 # ── movements ──────────────────────────────────────────────────────────────
 
 def insert_movement(
@@ -57,9 +98,9 @@ def insert_movement(
     persona: str | None = None,
 ) -> bool:
     ref = _db().collection("movements").document(mov_id)
-    if ref.get().exists:
+    if _with_retry(lambda: ref.get().exists):
         return False
-    ref.set({
+    payload = {
         "id": mov_id,
         "date": date_iso,
         "description": description,
@@ -85,7 +126,8 @@ def insert_movement(
         "notified_at": None,
         "tg_photo_file_id": None,
         "inserted_at": _now(),
-    })
+    }
+    _with_retry(lambda: ref.set(payload))
     return True
 
 
@@ -107,7 +149,8 @@ def update_classification(
     requiere_revision: bool = False,
     pregunta_sugerida: str | None = None,
 ) -> None:
-    _db().collection("movements").document(mov_id).update({
+    ref = _db().collection("movements").document(mov_id)
+    payload = {
         "suggested_category": suggested_category,
         "suggested_subcategory": suggested_subcategory,
         "confidence": confidence,
@@ -116,7 +159,8 @@ def update_classification(
         "tipo": tipo,
         "requiere_revision": requiere_revision,
         "pregunta_sugerida": pregunta_sugerida,
-    })
+    }
+    _with_retry(lambda: ref.update(payload))
 
 
 def mark_notified(ids: list[str]) -> None:

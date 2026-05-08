@@ -288,6 +288,19 @@ en Firestore `credentials/<banco>`.
 
 - **GSheet falla silenciosamente**: ya no debería — `gsheet.append_movement()` ahora hace `log.exception` con stack trace y `raise`. El caller (`feedback.py:_try_append`, `bot.py`) captura y avisa al usuario en TG con `⚠️ GSheet falló`. Causas frecuentes: hoja no compartida con `gastos@gastos-495422.iam.gserviceaccount.com`, cuota agotada, header desincronizado con el código (debe coincidir con `gsheet.SHEET_HEADER`).
 
+- **`DeadlineExceeded: 504 Deadline Exceeded`** en operaciones Firestore durante o
+  después de un scrape: gRPC se ensucia con FDs heredados cuando Playwright
+  forkea procesos hijos (Chromium). Mitigación aplicada en `src/db.py`:
+  - Env vars `GRPC_ENABLE_FORK_SUPPORT=1` y `GRPC_POLL_STRATEGY=poll` se setean
+    al top del módulo, antes del import de `firebase_admin` (gRPC inicializa
+    estructuras al load-time según ellas).
+  - Helper `_with_retry()` envuelve `insert_movement` y `update_classification`
+    con backoff exponencial (3 intentos, ~1.5s/3s/6s) ante errores gRPC
+    transient (`DeadlineExceeded`, `ServiceUnavailable`, `Aborted`,
+    `InternalServerError`, `RetryError`).
+  - Si vuelve a aparecer en operaciones distintas a esas, considerá envolver
+    también esa operación con `_with_retry`.
+
 ## Reglas
 
 - Solo lectura. Jamás transferencias, pagos ni modificaciones.
