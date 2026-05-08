@@ -529,6 +529,31 @@ def fetch_movements(page: Page) -> list[dict]:
     # Por si aparece un segundo popup en la pantalla de movimientos.
     _dismiss_popups(page)
 
+    # Step intermedio que se nos había escapado: la pantalla de saldos-movimientos
+    # NO muestra la tabla directamente. Primero hay una lista de cuentas (cta cte,
+    # ahorro, etc.) y hay que clickear "Cuenta Corriente" para entrar al detalle.
+    # El elemento es un <p> con class `btn-link btn-link--underline`, no un <a> ni
+    # un <button>, así que el selector tiene que ser específico.
+    log.info("BCh: buscando link 'Cuenta Corriente' para entrar al detalle…")
+    cta_cte_selectors = [
+        'p.btn-link:has-text("Cuenta Corriente")',
+        'p:has-text("Cuenta Corriente")',
+        'a:has-text("Cuenta Corriente")',
+        'button:has-text("Cuenta Corriente")',
+    ]
+    for sel in cta_cte_selectors:
+        try:
+            loc = page.locator(sel).first
+            if loc.is_visible(timeout=3000):
+                loc.click(timeout=4000)
+                log.info(f"BCh: click en 'Cuenta Corriente' OK con: {sel}")
+                page.wait_for_timeout(2000)
+                break
+        except Exception:
+            continue
+    else:
+        log.warning("BCh: no encontré link 'Cuenta Corriente' visible. Sigo igual — quizás ya estamos en el detalle.")
+
     # Si después del goto a movs nos rebotaron a Auth0, intentar un click en
     # cualquier link "Cuentas" / "Saldos y movimientos" del menú lateral
     # antes de rendirse — algunos flujos requieren navegación click-driven.

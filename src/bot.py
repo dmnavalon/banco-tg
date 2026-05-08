@@ -55,6 +55,12 @@ def _bot_token() -> str:
     return token
 
 
+def _running_in_cloud() -> bool:
+    """True si estamos corriendo en Railway u otro hosting cloud (no en la Mac).
+    Detecta por env vars que solo Railway/Docker setean."""
+    return any(os.environ.get(k) for k in ("RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID"))
+
+
 def _authorized_chat_id() -> str:
     chat_id = os.environ.get("TG_CHAT_ID", "").strip()
     if not chat_id:
