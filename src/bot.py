@@ -704,15 +704,61 @@ def _run_daily_in_thread() -> None:
         _send(f"Daily falló: {type(e).__name__}: {e}")
 
 
+_CUOTAS_RE = re.compile(r"\((\d+)\s*/\s*(\d+)\)\s*$")
+
+
+def _backfill_cuotas_from_description(movs: list[dict]) -> None:
+    """Para cada mov pendiente cuya descripción termina con '(X/N)' y que NO
+    tiene los campos cuotas_* poblados, los infiere desde el sufijo y los
+    persiste en Firestore. Modifica los dicts in-place.
+
+    Solo aplica a pendientes (los aprobados/corregidos quedan como están,
+    según la decisión de Diego). cuota_monto NO se infiere — solo se obtiene
+    re-scrapeando, queda None hasta entonces. El dashboard puede derivar la
+    mensualidad como `monto / cuotas_total` si necesita aproximación.
+    """
+    for mov in movs:
+        if mov.get("cuotas_total"):
+            continue  # ya enriquecido
+        desc = mov.get("description") or ""
+        m = _CUOTAS_RE.search(desc)
+        if not m:
+            continue
+        c_actual = int(m.group(1))
+        c_total = int(m.group(2))
+        if c_total <= 1:
+            continue  # 1/1 no aplica como compra en cuotas
+        # Persistir en Firestore con campos parciales (sin cuota_monto).
+        try:
+            ref = db._db().collection("movements").document(mov["id"])
+            db._with_retry(lambda r=ref, ca=c_actual, ct=c_total: r.update({
+                "cuotas_actual": ca,
+                "cuotas_total": ct,
+            }))
+        except Exception:
+            log.exception(f"backfill_cuotas: error persistiendo {mov.get('id')}")
+            continue
+        # In-place para el render que sigue.
+        mov["cuotas_actual"] = c_actual
+        mov["cuotas_total"] = c_total
+        log.info(f"backfill_cuotas: {mov.get('id')} → {c_actual}/{c_total}")
+
+
 def _ensure_classified(movs: list[dict]) -> None:
     """Para cada mov en la lista que no tenga suggested_category, llama al
     classifier (rule-first → Haiku) y persiste el resultado. Modifica los
     dicts in-place para que las tarjetas siguientes los muestren bien.
+    También enriquece campos de cuotas desde la descripción si faltan.
 
     Esto cubre el caso donde el daily insertó movimientos pero falló antes
-    de clasificarlos (ej. DeadlineExceeded de Firestore mid-loop).
+    de clasificarlos (ej. DeadlineExceeded de Firestore mid-loop), y también
+    el caso de movs viejos que no tienen los campos cuotas_* porque se
+    insertaron antes del feature.
     """
     from . import classifier
+
+    # Primero rellenar cuotas desde la descripción (rápido, no requiere LLM).
+    _backfill_cuotas_from_description(movs)
 
     pending = [m for m in movs if not m.get("suggested_category")]
     if not pending:
