@@ -1,9 +1,14 @@
 """Extiende el header del Google Sheet para incluir las 3 columnas nuevas
-de cuotas (Cuota actual, Cuotas total, Cuota a pagar) sin tocar las filas
-existentes — sus celdas en N/O/P quedan vacías hasta que se vuelvan a
-aprobar/corregir (ahí el upsert_movement las llena).
+de cuotas (Cuota actual, Cuotas total, Cuota a pagar) en posiciones 14-16,
+después de Subcategoría.
 
-Idempotente: si el header ya tiene las 16 columnas, no hace nada.
+Si el sheet ya tenía columnas adicionales del usuario (Moneda, MontoCLP,
+Esencial, Fijo, Recurrente, Extraordinario, Excluido, Notas, etc.) en
+posiciones 14+, las EMPUJA a la derecha (Moneda pasa de N a Q, etc.).
+Las celdas existentes preservan su contenido, gspread maneja el shift.
+
+Idempotente: si las 3 cols de cuotas ya están en algún lugar del header,
+no hace nada.
 
 Uso:
     cd "Gestión de Gastos"
@@ -24,6 +29,10 @@ from google.oauth2.service_account import Credentials  # noqa: E402
 
 from src.gsheet import SHEET_HEADER, SHEET_NAME, SPREADSHEET_ID  # noqa: E402
 
+CUOTAS_COLS = ["Cuota actual", "Cuotas total", "Cuota a pagar"]
+INSERT_AT = 14  # 1-indexed: justo después de Subcategoría (col 13)
+BOT_BASE_HEADER = SHEET_HEADER[:13]  # Fecha..Subcategoría — gestionadas por el bot
+
 
 def main() -> int:
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -33,40 +42,35 @@ def main() -> int:
 
     current = sheet.row_values(1)
     print(f"Header actual ({len(current)} cols): {current}")
-    print(f"Header esperado ({len(SHEET_HEADER)} cols): {SHEET_HEADER}")
 
-    if current == SHEET_HEADER:
-        print("\n✅ Header ya está al día. Nada que hacer.")
+    if all(c in current for c in CUOTAS_COLS):
+        positions = [(c, current.index(c) + 1) for c in CUOTAS_COLS]
+        print(f"\n✅ Las 3 columnas de cuotas ya existen en el header: {positions}")
+        print("    Nada que hacer.")
         return 0
 
-    # Caso: el header tiene menos columnas (las primeras N coinciden).
-    if len(current) < len(SHEET_HEADER) and SHEET_HEADER[: len(current)] == current:
-        new_cells = SHEET_HEADER[len(current):]
-        # Calcular rango destino. Letras de columna A=1, B=2, etc.
-        start_col = len(current) + 1
-        end_col = len(SHEET_HEADER)
-        start_letter = _col_letter(start_col)
-        end_letter = _col_letter(end_col)
-        cell_range = f"{start_letter}1:{end_letter}1"
-        sheet.update(cell_range, [new_cells], value_input_option="USER_ENTERED")
-        print(f"\n✅ Agregadas {len(new_cells)} columnas al header en rango {cell_range}: {new_cells}")
-        print(f"   Las filas existentes preservan su contenido — celdas {start_letter}..{end_letter} quedan vacías.")
-        return 0
+    if current[: len(BOT_BASE_HEADER)] != BOT_BASE_HEADER:
+        print("\n⚠️  Las primeras 13 columnas no coinciden con el header esperado.")
+        print(f"    Esperado: {BOT_BASE_HEADER}")
+        print("    No puedo insertar automáticamente. Edita el header manualmente.")
+        return 1
 
-    # Caso: el header tiene columnas distintas o está fuera de orden.
-    print("\n⚠️  El header actual no es un prefijo del esperado. NO se sobrescribe automáticamente.")
-    print("    Si querés forzar la actualización (perdiendo nombres viejos), edita la fila 1")
-    print("    manualmente desde Google Sheets para que coincida con SHEET_HEADER.")
-    return 1
+    print(f"\nInsertando 3 columnas en posición {INSERT_AT} (después de Subcategoría)…")
+    print(f"  Las cols actuales 14+ ({current[13:]}) se empujarán a 17+.")
 
+    # gspread.insert_cols inserta `values` (lista de listas, una por columna)
+    # en `col` (1-indexed). Empuja las existentes a la derecha. Solo
+    # rellenamos la fila 1 (header); las demás filas mantienen sus celdas
+    # originales en la nueva posición.
+    sheet.insert_cols(
+        [["Cuota actual"], ["Cuotas total"], ["Cuota a pagar"]],
+        col=INSERT_AT,
+    )
 
-def _col_letter(n: int) -> str:
-    """1 → A, 2 → B, ..., 27 → AA."""
-    out = ""
-    while n > 0:
-        n, rem = divmod(n - 1, 26)
-        out = chr(ord("A") + rem) + out
-    return out
+    print(f"\n✅ Listo. Header extendido a {len(SHEET_HEADER)} columnas.")
+    new_header = sheet.row_values(1)
+    print(f"   Header nuevo: {new_header}")
+    return 0
 
 
 if __name__ == "__main__":

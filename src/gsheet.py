@@ -18,21 +18,30 @@ SHEET_NAME = "Movimientos"
 
 _DAYS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-# Header oficial del sheet — 16 columnas. Si lo cambias, sincroniza la fila 1 del sheet
-# (ver scripts/extend_sheet_header.py para extender preservando las filas existentes).
+# Header oficial del sheet — 24 columnas. Si lo cambias, sincroniza la fila 1
+# del sheet (ver scripts/extend_sheet_header.py).
 #
-# Las 3 últimas columnas son metadata de cuotas:
-#   Cuota actual: nº de la cuota que se paga este mes (ej. 2 si "02/12")
-#   Cuotas total: total de cuotas del crédito (ej. 12)
-#   Cuota a pagar: monto de la cuota mensual (lo que sale ese mes — distinto de Monto total)
-# Solo se llenan en compras a más de 1 cuota; en compras "1/1" quedan vacías.
+# Layout:
+#   1-13:  Datos del movimiento (gestión del bot)
+#   14-16: Metadata de cuotas (gestión del bot, vacías en compras "1/1")
+#   17-24: Columnas del dashboard del usuario (Diego). El bot las preserva en
+#          append (las deja vacías) y NUNCA las toca en update — las llena
+#          el dashboard via fórmulas o input manual.
 SHEET_HEADER = [
+    # Bot:
     "Fecha", "Día", "Mes", "Año", "Día Semana",
     "Banco", "Persona",
     "Descripción", "Monto", "Tipo", "Saldo",
     "Categoría", "Subcategoría",
     "Cuota actual", "Cuotas total", "Cuota a pagar",
+    # Dashboard de Diego — el bot solo append-vacío:
+    "Moneda", "MontoCLP", "Esencial", "Fijo",
+    "Recurrente", "Extraordinario", "Excluido", "Notas",
 ]
+
+# Última columna que el bot escribe en update. Todo lo de la col 17 en adelante
+# es del usuario y NO se toca.
+_LAST_BOT_COL = SHEET_HEADER.index("Cuota a pagar") + 1  # 16
 
 
 def _client() -> gspread.Client:
@@ -159,9 +168,10 @@ def upsert_movement(mov: dict) -> None:
         existing_row = _find_existing_row(sheet, fecha, descripcion, monto_abs)
 
         if existing_row:
-            # Actualizamos Categoría (L), Subcategoría (M) y las 3 columnas de cuotas
-            # (N, O, P). El resto del row se preserva. Hacemos dos updates separados
-            # por contigüidad de rango.
+            # Update SOLO de las cols del bot: Categoría (L), Subcategoría (M),
+            # Cuota actual (N), Cuotas total (O), Cuota a pagar (P). Las cols
+            # 17-24 (Moneda, MontoCLP, Esencial, etc.) son del dashboard del
+            # usuario — NO se tocan, preservan cualquier fórmula o valor manual.
             sheet.update(
                 f"L{existing_row}:P{existing_row}",
                 [[cat, sub, cuota_actual_cell, cuotas_total_cell, cuota_pagar_cell]],
@@ -169,6 +179,9 @@ def upsert_movement(mov: dict) -> None:
             )
             log.info(f"GSheet UPDATE row {existing_row}: {fecha} · {descripcion[:40]} → {cat}/{sub}")
         else:
+            # Append: las cols 17-24 (dashboard del usuario) van vacías. Si tu
+            # dashboard tiene fórmulas (ej. =F2 = Banco) que se autoaplican a
+            # filas nuevas, se siguen evaluando porque las cols 1-13 sí están.
             row = [
                 fecha,                                         # 1.  Fecha (DD/MM/YYYY)
                 dia,                                           # 2.  Día (número)
@@ -186,6 +199,8 @@ def upsert_movement(mov: dict) -> None:
                 cuota_actual_cell,                             # 14. Cuota actual
                 cuotas_total_cell,                             # 15. Cuotas total
                 cuota_pagar_cell,                              # 16. Cuota a pagar
+                # 17-24 (dashboard del usuario): el bot deja vacío.
+                "", "", "", "", "", "", "", "",
             ]
             sheet.append_row(row, value_input_option="USER_ENTERED")
             log.info(f"GSheet APPEND: {fecha} · {descripcion[:40]} → {cat}/{sub}")
