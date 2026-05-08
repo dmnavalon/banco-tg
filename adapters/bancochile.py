@@ -212,13 +212,45 @@ def fetch_movements(page: Page) -> list[dict]:
     log.info("Navegando directo a saldos-movimientos de Banco de Chile…")
     page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
 
+    # Algunos navegadores no procesan el hash `#/.../saldos-movimientos/` si el
+    # cliente de Angular ya estaba en otra ruta. Damos un nudge y verificamos.
+    page.wait_for_timeout(3000)
+    log.info(f"BCh: URL post-goto = {page.url}")
+
     # La SPA carga async. Esperamos a que aparezca al menos una fila real
     # (no una table-collapse-row, esas son filas-fantasma de animación).
     try:
         page.wait_for_selector(SEL_TABLE_ROW, state="attached", timeout=40000)
         page.wait_for_timeout(2000)
     except PWTimeout:
-        raise ScraperBroken("No encontré tabla de movimientos en Banco de Chile.")
+        # Diagnóstico para entender dónde quedó la página: URL final,
+        # tablas presentes (con clase y filas), y headings visibles.
+        try:
+            diag = page.evaluate("""
+                () => {
+                    const tables = Array.from(document.querySelectorAll('table')).map(t => ({
+                        class: t.className,
+                        rows: t.querySelectorAll('tbody tr').length,
+                        headers: Array.from(t.querySelectorAll('thead th')).map(h => h.textContent.trim()).slice(0, 6),
+                    }));
+                    const headings = Array.from(document.querySelectorAll('h1, h2, h3'))
+                        .map(h => h.textContent.trim()).filter(t => t).slice(0, 6);
+                    const buttons = Array.from(document.querySelectorAll('button, a[role="button"]'))
+                        .filter(b => b.offsetParent !== null)
+                        .map(b => b.textContent.trim().slice(0, 40))
+                        .filter(t => t.length > 0).slice(0, 12);
+                    return { url: window.location.href, headings, tables, buttons };
+                }
+            """)
+            log.warning(f"BCh diag URL: {diag.get('url')!r}")
+            log.warning(f"BCh diag headings: {diag.get('headings')}")
+            log.warning(f"BCh diag tables: {diag.get('tables')}")
+            log.warning(f"BCh diag botones visibles: {diag.get('buttons')}")
+        except Exception as diag_err:
+            log.warning(f"BCh: no pude obtener diagnóstico de la página: {diag_err}")
+        raise ScraperBroken(
+            f"No encontré tabla de movimientos en Banco de Chile (URL final: {page.url})."
+        )
 
     movements: list[dict] = []
     page_num = 1
