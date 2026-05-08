@@ -83,8 +83,23 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
     page.wait_for_timeout(2000)
 
     if DASHBOARD_PATTERN.search(page.url):
-        log.info("Sesión persistida activa. Saltando login.")
-        return
+        # La cookie del portal está vigente, pero BCh tiene cookies separadas
+        # para distintos paths. La sesión home puede ser válida y la de
+        # movimientos no. Verificamos navegando a MOVEMENTS_URL: si nos rebota
+        # a Auth0 (login.portales.bancochile.cl), la sesión persistida expiró
+        # y hay que re-loguear con RUT/clave.
+        log.info("Sesión persistida del portal activa. Verificando acceso a movimientos…")
+        page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2500)
+        if DASHBOARD_PATTERN.search(page.url):
+            log.info("Sesión persistida válida para movimientos. Saltando login.")
+            return
+        log.warning(
+            f"Sesión persistida expiró al navegar a movimientos (URL: {page.url}). "
+            f"Re-logueando con credenciales."
+        )
+        page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_timeout(2000)
 
     if any_present(page, SEL_CAPTCHA_FILLED, timeout_ms=2000):
         raise CaptchaPresent("Banco de Chile está mostrando un captcha. Login automático abortado.")

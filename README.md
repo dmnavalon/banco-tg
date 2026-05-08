@@ -278,6 +278,7 @@ en Firestore `credentials/<banco>`.
   - Filas vacías de animación con clase `table-collapse-row` — saltarlas con `tr.bch-row:not(.table-collapse-row)`.
   - Cargo y abono van en columnas separadas; una de las dos viene vacía. El parser detecta cuál tiene monto y asigna signo.
   - Paginación con botones Material: `button.mat-paginator-navigation-next`. Iterar hasta que esté `disabled`.
+  - **Sesión persistida con doble validación**: la cookie del portal home (`portalpersonas.bancochile.cl`) puede estar vigente pero la cookie de la pantalla de movimientos puede haber expirado por separado. Síntoma: `login()` reporta "Sesión persistida activa" pero después `fetch_movements()` falla porque la URL terminó en `login.portales.bancochile.cl/authorize?...` (Auth0 OAuth2 redirect). Por eso `login()` ahora navega a `MOVEMENTS_URL` para verificar el segundo nivel de auth — si rebota a Auth0, hace login fresh con RUT/clave.
 
 - **`Banco de Chile mostró captcha`**: Si BCh pide captcha el flujo
   aborta. No lo bypaseamos. Espera unas horas y reintenta.
