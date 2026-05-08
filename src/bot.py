@@ -127,15 +127,18 @@ def _handle_message(msg: dict[str, Any]) -> None:
     if not text:
         return
 
-    # Force Reply: si el mensaje es respuesta a un prompt de corrección, rutear acá
-    # antes que cualquier otra cosa. Esto resuelve el caso de varias correcciones
+    # Force Reply: si el mensaje es respuesta a un prompt de corrección o ignore,
+    # rutear acá antes que cualquier otra cosa. Resuelve el caso de varias acciones
     # activas simultáneamente sin ambigüedad.
     reply_to = msg.get("reply_to_message")
     if reply_to:
         reply_to_id = str(reply_to.get("message_id", ""))
-        pending = db.get_pending_correction(reply_to_id)
+        pending = db.get_pending_user_action(reply_to_id)
         if pending:
-            _handle_correction_reply(text, chat_id, pending, reply_to_id)
+            if pending.get("action") == "ignore":
+                _handle_ignore_reply(text, chat_id, pending, reply_to_id)
+            else:
+                _handle_correction_reply(text, chat_id, pending, reply_to_id)
             return
 
     if text.lower().startswith("otp "):
@@ -373,20 +376,23 @@ def _handle_callback(callback: dict[str, Any]) -> None:
                        keyboard=_correct_again_keyboard(mov_id))
 
     elif action == "i":
-        if mov.get("status") == "ignorado":
-            log.info(f"ignore duplicado para mov {mov_id} (ya estaba ignorado)")
-            if message_id:
-                from .telegram_notify import _movement_card_text
-                _edit_card(chat_id, message_id, mov,
-                           f"{_movement_card_text(mov)}\n\n⚫ <b>Ignorado</b>",
-                           keyboard=_correct_again_keyboard(mov_id))
-            return
-        db.update_decision(mov_id, status="ignorado", final_category=None, final_subcategory=None, decided_by=chat_id)
+        # En lugar de marcar como ignorado inmediatamente, pedimos una razón
+        # con force_reply. La marca real ocurre en _handle_ignore_reply cuando
+        # el usuario responde (puede mandar "skip" para ignorar sin razón, o
+        # "cancelar" para abortar).
+        prompt_id = telegram_notify.send_ignore_prompt(chat_id, mov)
+        if prompt_id:
+            db.save_pending_user_action(
+                prompt_message_id=str(prompt_id),
+                mov_id=mov_id,
+                chat_id=chat_id,
+                action="ignore",
+                original_card_message_id=message_id,
+            )
         if message_id:
             from .telegram_notify import _movement_card_text
             _edit_card(chat_id, message_id, mov,
-                       f"{_movement_card_text(mov)}\n\n⚫ <b>Ignorado</b>",
-                       keyboard=_correct_again_keyboard(mov_id))
+                       f"{_movement_card_text(mov)}\n\n🚫 <i>Esperando razón…</i>")
 
     elif action == "c":
         # Force Reply: mandar un prompt nuevo que abre el input citando este mensaje
@@ -554,6 +560,65 @@ def _handle_correction_reply(text: str, chat_id: str, pending: dict, prompt_msg_
     refreshed = db.get_movements_by_ids([mov_id])
     if refreshed:
         telegram_notify.send_movement_cards([refreshed[0]])
+
+
+def _handle_ignore_reply(text: str, chat_id: str, pending: dict, prompt_msg_id: str) -> None:
+    """Procesa la respuesta del usuario a un prompt de Force Reply para ignorar
+    un movimiento. La razón se guarda en `ignore_reason` del documento Firestore.
+
+    Comandos especiales del texto:
+      - "cancelar"/"cancel"/"abortar"/"salir" → no ignora, reenvía la tarjeta original.
+      - "skip"/"sin razón"/"-" → ignora sin razón (queda como ignorado, sin reason).
+      - cualquier otro texto → ignora con esa razón.
+    """
+    mov_id = pending.get("mov_id", "")
+    db.delete_pending_user_action(prompt_msg_id)
+
+    try:
+        telegram_notify.delete_message(chat_id, int(prompt_msg_id))
+    except Exception:
+        pass
+
+    movs = db.get_movements_by_ids([mov_id])
+    if not movs:
+        _send("Movimiento no encontrado en la base.")
+        return
+    mov = movs[0]
+
+    text_clean = text.strip()
+    text_lower = text_clean.lower()
+
+    if text_lower in {"cancelar", "cancel", "abort", "abortar", "salir"}:
+        # Reenviar la tarjeta original con sus 3 botones.
+        telegram_notify.send_movement_cards([mov])
+        _send("✖️ Ignore cancelado.")
+        return
+
+    reason: str | None = text_clean
+    if text_lower in {"skip", "sin razon", "sin razón", "-", "ninguna", "nada"}:
+        reason = None
+
+    db.update_decision(
+        mov_id,
+        status="ignorado",
+        final_category=None,
+        final_subcategory=None,
+        decided_by=chat_id,
+        ignore_reason=reason,
+    )
+
+    # Editar la tarjeta original para mostrarla como Ignorado (con razón si la hay)
+    # + botón "Corregir nuevamente" por si Diego cambia de opinión después.
+    refreshed = db.get_movements_by_ids([mov_id])
+    if refreshed:
+        mov_new = refreshed[0]
+        orig_msg_id = pending.get("original_card_message_id")
+        if orig_msg_id:
+            from .telegram_notify import _movement_card_text
+            badge = f"\n\n⚫ <b>Ignorado:</b> {_hesc(reason)}" if reason else "\n\n⚫ <b>Ignorado</b>"
+            _edit_card(chat_id, int(orig_msg_id), mov_new,
+                       f"{_movement_card_text(mov_new)}{badge}",
+                       keyboard=_correct_again_keyboard(mov_id))
 
 
 def _handle_greeting() -> None:

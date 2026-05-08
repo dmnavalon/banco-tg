@@ -338,6 +338,50 @@ def send_correction_prompt(chat_id: str, mov: dict) -> int | None:
     return None
 
 
+def send_ignore_prompt(chat_id: str, mov: dict) -> int | None:
+    """Manda un prompt con force_reply para pedir la razón al ignorar un movimiento.
+    Mismo mecanismo que `send_correction_prompt` pero el texto pide razón en lugar
+    de corrección, y el caller debe registrar el pending_user_action con
+    `action="ignore"`.
+
+    Devuelve el message_id del prompt (para mapear la respuesta al movimiento)
+    o None si falló el envío.
+    """
+    desc = (mov.get("description") or "")[:60]
+    amount_str = format_clp(abs(mov.get("amount") or 0))
+    fecha = mov.get("date") or ""
+    persona = mov.get("persona") or ""
+    persona_str = f" · {_esc(persona)}" if persona else ""
+
+    text = (
+        f"🚫 <b>Ignorar este movimiento</b>\n"
+        f"📅 {_esc(fecha)} · 💸 {_esc(amount_str)}{persona_str}\n"
+        f"<code>{_esc(desc)}</code>\n\n"
+        f"Responde a <i>este</i> mensaje con la razón.\n"
+        f"Ejemplos: «duplicado», «movimiento de prueba», «pago entre cuentas propias».\n"
+        f"Escribe «skip» para ignorar sin razón, o «cancelar» para abortar."
+    )
+    payload = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": {
+            "force_reply": True,
+            "selective": True,
+            "input_field_placeholder": "Razón, «skip» o «cancelar»",
+        },
+    }
+    try:
+        r = requests.post(f"{TG_API}/bot{_bot_token()}/sendMessage", json=payload, timeout=10)
+        if r.status_code == 200 and r.json().get("ok"):
+            return r.json()["result"]["message_id"]
+        log.warning(f"send_ignore_prompt {r.status_code}: {r.text[:200]}")
+    except Exception as e:
+        log.warning(f"send_ignore_prompt falló: {e}")
+    return None
+
+
 def delete_message(chat_id: str, message_id: int) -> None:
     """Elimina un mensaje del chat. Útil para limpiar el prompt de corrección
     una vez que la respuesta ya fue procesada."""
@@ -390,6 +434,13 @@ def _movement_card_text(mov: dict) -> str:
     ]
     if pregunta:
         lines += ["", f"⚠️ <b>Consulta:</b> {_esc(pregunta)}"]
+
+    # Si el mov fue ignorado con razón, mostrarla (útil cuando se reenvía la
+    # ignorada en /pending y el usuario quiere recordar por qué la ignoró).
+    if mov.get("status") == "ignorado":
+        reason = mov.get("ignore_reason")
+        if reason:
+            lines += ["", f"🚫 <b>Razón ignorada:</b> {_esc(reason)}"]
 
     return "\n".join(lines)
 
