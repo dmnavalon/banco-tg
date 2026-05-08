@@ -342,6 +342,22 @@ def _handle_callback(callback: dict[str, Any]) -> None:
     mov = movs[0]
 
     if action == "a":
+        # Guard contra doble-approve: si ya estaba aprobado (ej. el usuario clickea
+        # ✅ en dos tarjetas duplicadas que el bot envió por error), no volver a
+        # llamar upsert_movement — eso evita el race condition con read-after-write
+        # del Google Sheets API que produce filas duplicadas en el sheet.
+        if mov.get("status") == "aprobado":
+            log.info(f"approve duplicado ignorado para mov {mov_id} (ya estaba aprobado)")
+            cat = mov.get("final_category") or mov.get("suggested_category") or "Otro"
+            sub = mov.get("final_subcategory") or mov.get("suggested_subcategory")
+            label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
+            if message_id:
+                from .telegram_notify import _movement_card_text
+                _edit_card(chat_id, message_id, mov,
+                           f"{_movement_card_text(mov)}\n\n✅ <b>Aprobado:</b> {label}",
+                           keyboard=_correct_again_keyboard(mov_id))
+            return
+
         cat = mov.get("suggested_category") or "Otro"
         sub = mov.get("suggested_subcategory")
         db.update_decision(mov_id, status="aprobado", final_category=cat, final_subcategory=sub, decided_by=chat_id)
@@ -357,6 +373,14 @@ def _handle_callback(callback: dict[str, Any]) -> None:
                        keyboard=_correct_again_keyboard(mov_id))
 
     elif action == "i":
+        if mov.get("status") == "ignorado":
+            log.info(f"ignore duplicado para mov {mov_id} (ya estaba ignorado)")
+            if message_id:
+                from .telegram_notify import _movement_card_text
+                _edit_card(chat_id, message_id, mov,
+                           f"{_movement_card_text(mov)}\n\n⚫ <b>Ignorado</b>",
+                           keyboard=_correct_again_keyboard(mov_id))
+            return
         db.update_decision(mov_id, status="ignorado", final_category=None, final_subcategory=None, decided_by=chat_id)
         if message_id:
             from .telegram_notify import _movement_card_text
@@ -547,9 +571,9 @@ def _handle_greeting() -> None:
         n = len(rows)
         plural = "s" if n != 1 else ""
         _send(f"👋 Hola, Diego.\n\nTienes {n} movimiento{plural} pendiente{plural} de revisión:")
-        # Pasamos los dicts de Firestore tal cual para conservar tg_photo_file_id,
-        # persona, y otros campos opcionales que la tarjeta usa.
-        telegram_notify.send_movement_cards(list(rows))
+        movs = list(rows)
+        _ensure_classified(movs)
+        telegram_notify.send_movement_cards(movs)
     except Exception as e:
         db.record_error("bot.greeting", str(e), traceback.format_exc())
         _send(f"Error al consultar pendientes: {type(e).__name__}: {e}")
@@ -606,6 +630,57 @@ def _run_daily_in_thread() -> None:
         _send(f"Daily falló: {type(e).__name__}: {e}")
 
 
+def _ensure_classified(movs: list[dict]) -> None:
+    """Para cada mov en la lista que no tenga suggested_category, llama al
+    classifier (rule-first → Haiku) y persiste el resultado. Modifica los
+    dicts in-place para que las tarjetas siguientes los muestren bien.
+
+    Esto cubre el caso donde el daily insertó movimientos pero falló antes
+    de clasificarlos (ej. DeadlineExceeded de Firestore mid-loop).
+    """
+    from . import classifier
+
+    pending = [m for m in movs if not m.get("suggested_category")]
+    if not pending:
+        return
+
+    log.info(f"_ensure_classified: {len(pending)} movs sin categoría — clasificando con LLM…")
+    if len(pending) > 5:
+        _send(f"⏳ Clasificando {len(pending)} movimientos sin categoría… (puede tardar ~{len(pending)}s)")
+
+    for mov in pending:
+        try:
+            cls = classifier.classify(mov.get("description", ""), float(mov.get("amount") or 0))
+        except Exception as e:
+            log.exception(f"Error clasificando mov {mov.get('id')}")
+            continue
+        try:
+            db.update_classification(
+                mov["id"],
+                suggested_category=cls.category,
+                suggested_subcategory=cls.subcategory,
+                confidence=cls.confidence,
+                classifier_source=cls.source,
+                comercio=cls.comercio,
+                tipo=cls.tipo,
+                requiere_revision=cls.requiere_revision,
+                pregunta_sugerida=cls.pregunta_sugerida,
+            )
+        except Exception:
+            log.exception(f"Error persistiendo clasificación de mov {mov.get('id')}")
+        # Update in-place para que el render de la tarjeta use los valores nuevos
+        mov["suggested_category"] = cls.category
+        mov["suggested_subcategory"] = cls.subcategory
+        mov["confidence"] = cls.confidence
+        mov["classifier_source"] = cls.source
+        if cls.comercio:
+            mov["comercio"] = cls.comercio
+        if cls.tipo:
+            mov["tipo"] = cls.tipo
+        mov["requiere_revision"] = cls.requiere_revision
+        mov["pregunta_sugerida"] = cls.pregunta_sugerida
+
+
 def _send_next_page() -> None:
     try:
         msg = telegram_notify.send_next_batch_page()
@@ -625,7 +700,11 @@ def _resend_pending() -> None:
         # Reusamos el dict completo de Firestore para que `send_movement_cards`
         # tenga acceso a tg_photo_file_id, persona, y cualquier campo nuevo que
         # se agregue al modelo en el futuro sin tener que actualizar este loop.
-        telegram_notify.send_daily_batch(list(rows))
+        movs = list(rows)
+        # Clasificar on-demand los que quedaron sin categoría (ej. el daily se
+        # cortó con DeadlineExceeded antes de clasificarlos).
+        _ensure_classified(movs)
+        telegram_notify.send_daily_batch(movs)
     except Exception as e:
         db.record_error("bot.pending", str(e), traceback.format_exc())
         _send(f"Error reenviando pendientes: {type(e).__name__}: {e}")
