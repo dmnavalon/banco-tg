@@ -93,6 +93,32 @@ def _is_at_dashboard(url: str) -> bool:
 DASHBOARD_PATTERN = _is_at_dashboard
 
 
+def _type_human(page: Page, selectors: list[str], value: str, delay_ms: int = 90, timeout_ms: int = 5000) -> bool:
+    """Llena un input simulando tipeo humano (dispara keydown/keypress/input/keyup
+    por cada carácter, en vez de setear el valor de una vez como hace fill()).
+
+    Necesario en formularios Angular Material como el de BCh, donde el botón
+    submit viene `disabled=""` en HTML y solo se habilita cuando los listeners
+    de keystroke detectan que los inputs son válidos. Con `page.fill()` el
+    valor se setea pero los listeners no se disparan, el botón queda disabled,
+    y el click no submitea nada — el form queda en su estado anterior y BCh
+    devuelve la página de login con el mensaje «Los datos ingresados no son
+    correctos» del intento anterior.
+    """
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            loc.wait_for(state="visible", timeout=timeout_ms)
+            loc.click()
+            loc.fill("")  # limpia cualquier valor residual
+            page.wait_for_timeout(120)
+            loc.type(value, delay=delay_ms)
+            return True
+        except Exception:
+            continue
+    return False
+
+
 def _format_rut_chileno(rut: str) -> str:
     """Formatea un RUT al formato display chileno con puntos: '15935723-6' → '15.935.723-6'.
 
@@ -183,20 +209,41 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
         raise CaptchaPresent("Banco de Chile está mostrando un captcha. Login automático abortado.")
 
     rut_formatted = _format_rut_chileno(rut)
-    log.info(f"Llenando RUT… (formato: {rut_formatted!r}, selectores: {SEL_RUT})")
-    if not fill_first(page, SEL_RUT, rut_formatted):
+    log.info(f"Tipeando RUT… (formato: {rut_formatted!r}, selectores: {SEL_RUT})")
+    if not _type_human(page, SEL_RUT, rut_formatted):
         _log_state(page, "fail-rut")
         raise ScraperBroken("No encontré el campo RUT en Banco de Chile.")
-    log.info("RUT llenado OK.")
+    log.info("RUT tipeado OK.")
 
-    log.info(f"Llenando clave… (selectores: {SEL_PASS})")
-    if not fill_first(page, SEL_PASS, password):
+    log.info(f"Tipeando clave… (selectores: {SEL_PASS})")
+    if not _type_human(page, SEL_PASS, password):
         _log_state(page, "fail-pass")
         raise ScraperBroken("No encontré el campo de clave en Banco de Chile.")
-    log.info("Clave llenada OK.")
+    log.info("Clave tipeada OK.")
 
     if any_present(page, SEL_CAPTCHA_FILLED, timeout_ms=1500):
         raise CaptchaPresent("Banco de Chile mostró captcha tras llenar el form.")
+
+    # Diagnóstico: chequear que el botón submit ya no esté disabled tras tipear.
+    # Si sigue disabled, el form no validó el input y el click no va a submitear.
+    page.wait_for_timeout(500)
+    try:
+        submit_loc = page.locator(SEL_SUBMIT[0]).first
+        disabled_attr = submit_loc.get_attribute("disabled")
+        is_aria_disabled = (submit_loc.get_attribute("aria-disabled") or "").lower() == "true"
+        log.info(f"Submit antes de click: disabled={disabled_attr!r} aria-disabled={is_aria_disabled}")
+        if disabled_attr is not None or is_aria_disabled:
+            _log_state(page, "submit-disabled-pre-click")
+            raise LoginFailed(
+                "El botón Ingresar de BCh sigue disabled tras tipear RUT y clave. "
+                "Probable: el form de Angular no validó los inputs. "
+                "Esto pasa si el RUT no está en formato válido (con dígito verificador correcto) "
+                "o si la clave tiene caracteres no aceptados. Verifica /forget bancochile + /cred bancochile."
+            )
+    except LoginFailed:
+        raise
+    except Exception as e:
+        log.warning(f"No pude inspeccionar estado del botón submit: {e}")
 
     log.info(f"Click submit… (selectores: {SEL_SUBMIT})")
     if not click_first(page, SEL_SUBMIT):
