@@ -93,6 +93,31 @@ def _is_at_dashboard(url: str) -> bool:
 DASHBOARD_PATTERN = _is_at_dashboard
 
 
+def _format_rut_chileno(rut: str) -> str:
+    """Formatea un RUT al formato display chileno con puntos: '15935723-6' → '15.935.723-6'.
+
+    BCh tiene un listener Angular que formatea en vivo el input a este formato
+    cuando el usuario tipea. `page.fill()` setea el valor directo sin disparar
+    los keypress events, por lo que el RUT queda sin puntos en el form, y BCh
+    lo rechaza al validar con «Los datos ingresados no son correctos».
+    Pre-formatear evita el problema. Idempotente — si ya viene con puntos, no
+    los duplica.
+    """
+    rut = (rut or "").strip()
+    if "-" not in rut:
+        return rut
+    body, dv = rut.rsplit("-", 1)
+    body = body.replace(".", "").lstrip("0")
+    if not body.isdigit():
+        return rut
+    parts: list[str] = []
+    while len(body) > 3:
+        parts.append(body[-3:])
+        body = body[:-3]
+    parts.append(body)
+    return f"{'.'.join(reversed(parts))}-{dv.upper()}"
+
+
 def _log_state(page: Page, label: str) -> None:
     """Helper de diagnóstico: loguea URL actual + presencia de campos clave."""
     try:
@@ -157,8 +182,9 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
     if any_present(page, SEL_CAPTCHA_FILLED, timeout_ms=2000):
         raise CaptchaPresent("Banco de Chile está mostrando un captcha. Login automático abortado.")
 
-    log.info(f"Llenando RUT… (selectores: {SEL_RUT})")
-    if not fill_first(page, SEL_RUT, rut):
+    rut_formatted = _format_rut_chileno(rut)
+    log.info(f"Llenando RUT… (formato: {rut_formatted!r}, selectores: {SEL_RUT})")
+    if not fill_first(page, SEL_RUT, rut_formatted):
         _log_state(page, "fail-rut")
         raise ScraperBroken("No encontré el campo RUT en Banco de Chile.")
     log.info("RUT llenado OK.")
