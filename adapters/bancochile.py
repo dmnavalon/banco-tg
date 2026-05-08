@@ -464,6 +464,13 @@ def _send_diagnostic_screenshot(page: Page, label: str) -> None:
     """Captura screenshot de la pantalla actual y lo manda por Telegram al chat
     autorizado. Útil para debug visual cuando un selector no aparece y los
     logs de texto no son suficientes."""
+    # Damos 2s extra antes del screenshot para que la SPA termine de renderizar
+    # cualquier loader/spinner final. Sin esto, el screenshot suele salir blanco
+    # en SPAs lentas (Angular Material esperando datos asíncronos).
+    try:
+        page.wait_for_timeout(2000)
+    except Exception:
+        pass
     # Solo viewport (no full_page) — full_page suele exceder los límites de
     # tamaño y el upload es muy lento desde Railway.
     try:
@@ -506,6 +513,15 @@ def fetch_movements(page: Page) -> list[dict]:
     log.info("Navegando directo a saldos-movimientos de Banco de Chile…")
     page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
 
+    # Espera adicional: la SPA Angular tarda en bootear (chunks JS, llamadas API
+    # iniciales). Esperamos networkidle con timeout permisivo — si BCh tiene
+    # polling continuo no llega nunca a idle, no es bloqueante.
+    try:
+        page.wait_for_load_state("networkidle", timeout=15000)
+        log.info("BCh: networkidle alcanzado tras goto.")
+    except PWTimeout:
+        log.info("BCh: networkidle no alcanzó timeout (probable polling continuo). Sigo igual.")
+
     page.wait_for_timeout(3000)
     log.info(f"BCh: URL post-goto = {page.url}")
     _log_state(page, "post-goto-movements")
@@ -525,11 +541,25 @@ def fetch_movements(page: Page) -> list[dict]:
             f"probable token JWT que requiere step-up auth o navegación click-driven desde el menú."
         )
 
-    # La SPA carga async. Esperamos a que aparezca al menos una fila real.
-    try:
-        page.wait_for_selector(SEL_TABLE_ROW, state="attached", timeout=40000)
-        page.wait_for_timeout(2000)
-    except PWTimeout:
+    # La SPA carga async. Esperamos hasta 90s con polling de 10s para loguear
+    # progreso (sino los logs se ven congelados durante el wait largo).
+    log.info("Esperando que aparezca la tabla bch-table (hasta 90s con progreso cada 10s)…")
+    table_appeared = False
+    for i in range(9):
+        try:
+            page.wait_for_selector(SEL_TABLE_ROW, state="attached", timeout=10000)
+            table_appeared = True
+            log.info(f"BCh: tabla encontrada tras {(i+1)*10}s de espera.")
+            page.wait_for_timeout(2000)
+            break
+        except PWTimeout:
+            log.info(f"BCh: tabla aún no aparece ({(i+1)*10}s). Reintentando…")
+            # Algunos modales asincrónicos aparecen tarde — limpiar por las dudas.
+            try:
+                _dismiss_popups(page)
+            except Exception:
+                pass
+    if not table_appeared:
         try:
             diag = page.evaluate("""
                 () => {
