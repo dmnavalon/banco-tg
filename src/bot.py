@@ -285,15 +285,34 @@ def _handle_command(text: str, chat_id: str) -> None:
     _send(f"Comando no reconocido: {cmd}. /help")
 
 
-def _edit_card(chat_id: str, message_id: int, mov: dict, new_text: str) -> None:
+def _edit_card(chat_id: str, message_id: int, mov: dict, new_text: str, *, keyboard: dict | None = None) -> None:
     """Edita una tarjeta de movimiento. Si la tarjeta original tiene foto
     (file_id en mov), usa editMessageCaption; si no, editMessageText.
-    Quita el inline keyboard (los botones) tras la decisión."""
+
+    Por default quita el inline keyboard. Si el caller pasa `keyboard`, se usa
+    ese (ej. para dejar un botón 'Corregir nuevamente' tras aprobar/ignorar).
+    """
     has_photo = bool(mov.get("tg_photo_file_id"))
+    rm = keyboard if keyboard is not None else {"inline_keyboard": []}
     if has_photo:
-        telegram_notify.edit_message_caption(chat_id, message_id, new_text, reply_markup={"inline_keyboard": []})
+        telegram_notify.edit_message_caption(chat_id, message_id, new_text, reply_markup=rm)
     else:
+        # editMessageText no recibe reply_markup en nuestro helper actual,
+        # pero igual editamos el texto. Si necesitamos reply_markup en text-only,
+        # lo manejamos como caso especial vía editMessageReplyMarkup aparte.
         telegram_notify.edit_message_text(chat_id, message_id, new_text)
+        # Mantener el keyboard customizado en mensajes sin foto:
+        if keyboard is not None:
+            telegram_notify.edit_message_reply_markup(chat_id, message_id, keyboard)
+
+
+def _correct_again_keyboard(mov_id: str) -> dict:
+    """Keyboard de un solo botón '✏️ Corregir nuevamente' para tarjetas ya
+    aprobadas o ignoradas. El callback es 'c:<id>', el mismo que el botón
+    'Corregir' original — reusa el flujo de Force Reply."""
+    return {"inline_keyboard": [[
+        {"text": "✏️ Corregir nuevamente", "callback_data": f"c:{mov_id}"},
+    ]]}
 
 
 def _handle_callback(callback: dict[str, Any]) -> None:
@@ -327,21 +346,23 @@ def _handle_callback(callback: dict[str, Any]) -> None:
         sub = mov.get("suggested_subcategory")
         db.update_decision(mov_id, status="aprobado", final_category=cat, final_subcategory=sub, decided_by=chat_id)
         try:
-            gsheet.append_movement({**mov, "final_category": cat, "final_subcategory": sub})
+            gsheet.upsert_movement({**mov, "final_category": cat, "final_subcategory": sub})
         except Exception as e:
-            log.warning(f"gsheet.append_movement falló: {e}")
+            log.warning(f"gsheet.upsert_movement falló: {e}")
         label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
         if message_id:
             from .telegram_notify import _movement_card_text
             _edit_card(chat_id, message_id, mov,
-                       f"{_movement_card_text(mov)}\n\n✅ <b>Aprobado:</b> {label}")
+                       f"{_movement_card_text(mov)}\n\n✅ <b>Aprobado:</b> {label}",
+                       keyboard=_correct_again_keyboard(mov_id))
 
     elif action == "i":
         db.update_decision(mov_id, status="ignorado", final_category=None, final_subcategory=None, decided_by=chat_id)
         if message_id:
             from .telegram_notify import _movement_card_text
             _edit_card(chat_id, message_id, mov,
-                       f"{_movement_card_text(mov)}\n\n⚫ <b>Ignorado</b>")
+                       f"{_movement_card_text(mov)}\n\n⚫ <b>Ignorado</b>",
+                       keyboard=_correct_again_keyboard(mov_id))
 
     elif action == "c":
         # Force Reply: mandar un prompt nuevo que abre el input citando este mensaje

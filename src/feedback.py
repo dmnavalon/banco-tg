@@ -138,7 +138,7 @@ def _approve_all(ids: list[str], chat_id: str) -> str:
 def _try_append(mov: dict) -> str:
     """Empuja el movimiento al GSheet. Si falla, loguea con stack y devuelve un warning para el mensaje al usuario."""
     try:
-        gsheet.append_movement(mov)
+        gsheet.upsert_movement(mov)
         return ""
     except Exception as e:
         log.exception("No pude empujar al GSheet")

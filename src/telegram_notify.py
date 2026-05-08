@@ -265,6 +265,18 @@ def edit_message_text(chat_id: str, message_id: int, text: str, parse_mode: str 
         pass
 
 
+def edit_message_reply_markup(chat_id: str, message_id: int, reply_markup: dict) -> None:
+    """Edita solo el inline keyboard de un mensaje (sin tocar texto/caption)."""
+    try:
+        requests.post(
+            f"{TG_API}/bot{_bot_token()}/editMessageReplyMarkup",
+            json={"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup},
+            timeout=10,
+        )
+    except Exception:
+        pass
+
+
 def edit_message_caption(chat_id: str, message_id: int, caption: str, parse_mode: str = "HTML", reply_markup: dict | None = None) -> None:
     """Edita el caption de un mensaje sendPhoto. Necesario para tarjetas con foto:
     editMessageText falla en mensajes con foto, hay que usar editMessageCaption."""
