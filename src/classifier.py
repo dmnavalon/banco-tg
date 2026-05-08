@@ -57,7 +57,7 @@ SYSTEM_PROMPT = """Eres un agente experto en clasificación de movimientos finan
 Tu tarea es leer movimientos de ingresos y egresos de una familia compuesta por 2 adultos y 3 niños, y clasificarlos correctamente usando la taxonomía entregada.
 
 Reglas principales:
-1. Usa únicamente las categorías y subcategorías de la taxonomía.
+1. Usa únicamente las categorías y subcategorías de la taxonomía cuando NO hay pista del usuario.
 2. Si el movimiento es ambiguo, usa la categoría más probable con confianza baja.
 3. Si no hay información suficiente, marca requiere_revision: true.
 4. Si parece ser movimiento entre cuentas propias, clasifica como Transferencias internas.
@@ -66,9 +66,16 @@ Reglas principales:
 7. Si es sueldo, honorarios, dividendos, intereses o arriendos recibidos, clasifícalo como Ingreso.
 8. Si confianza < 0.75, entonces requiere_revision debe ser true.
 9. No uses "Otros" si existe una categoría más específica.
-10. No inventes categorías. No inventes subcategorías (con la excepción de la regla 12).
-11. Jardines infantiles y colegios privados de hijos clasifican como Educación / Educación Hijos. Por ejemplo "LEONCITO ESPAÑOL" es un jardín infantil de los hijos de Diego.
-12. EXCEPCIÓN PARA "Gastos por rendir": esta categoría se usa para gastos hechos con la tarjeta personal pero que se rendirán a un tercero (empresa o familiar). La subcategoría es el NOMBRE del tercero a quien se rinde. Si el contexto del usuario menciona un nombre que NO está en la lista predefinida (Bodemall, Faind, Amplia, Papá, Mamá, Hermano, Hermana), inventa la subcategoría con ese nombre tal cual lo entregó el usuario. NO uses esta categoría sin un hint explícito del usuario que indique que es por rendir."""
+10. Jardines infantiles y colegios privados de hijos clasifican como Educación / Educación Hijos. Por ejemplo "LEONCITO ESPAÑOL" es un jardín infantil de los hijos de Diego.
+
+REGLAS CUANDO HAY PISTA DEL USUARIO (hint):
+11. Si el usuario propone una categoría o subcategoría EXPLÍCITAMENTE (ej. «esto va a Bodemall», «ponlo como Pádel competencia»), úsala TAL CUAL la dijo, aunque NO exista en la taxonomía. NO la mapees automáticamente a una "parecida" — eso oculta la intención del usuario.
+12. Si el usuario propone algo NUEVO que no está en la taxonomía:
+    - devuelve `categoria` y `subcategoria` con los nombres EXACTOS propuestos por el usuario,
+    - marca `requiere_revision: true`,
+    - en `pregunta_sugerida` plantea explícitamente: «Sub-categoría nueva propuesta: "X" en "Y". ¿La uso así o prefieres mapear a [nombre cercano de la taxonomía]?» — para que el usuario pueda confirmar o redirigir.
+13. Si el usuario es ambiguo (ej. «esto es del trabajo» sin más), elige la mejor opción de la taxonomía y marca requiere_revision con una pregunta clarificatoria.
+14. EXCEPCIÓN PARA "Gastos por rendir": gastos hechos con tarjeta personal que se rinden a un tercero (empresa o familiar). La subcategoría es el NOMBRE del tercero. Lista predefinida: Bodemall, Faind, Amplia, Papá, Mamá, Hermano, Hermana. Si el usuario menciona otro nombre, úsalo tal cual. NO uses esta categoría sin un hint explícito del usuario."""
 
 
 class Classification(NamedTuple):
@@ -192,28 +199,51 @@ def _classify_with_agent(description: str, amount: float, hint: str | None = Non
     sub = parsed.get("subcategoria") or ""
     tipo = parsed.get("tipo") or ("Ingreso" if amount > 0 else "Egreso")
 
-    if cat not in TAXONOMY:
-        cat = "Otros ingresos" if amount > 0 else "Otros"
-        sub = "Ingresos extraordinarios" if amount > 0 else "Gastos no clasificados"
-    elif sub not in TAXONOMY[cat]:
-        if cat in EXTENSIBLE_CATEGORIES and sub:
-            # El LLM puede inventar subcategorías para categorías extensibles
-            # (ej. nuevo tercero a quien rendir un gasto). La aceptamos tal cual.
-            log.info(f"Subcategoría libre aceptada para {cat}: {sub!r}")
-        else:
-            sub = TAXONOMY[cat][0]
-
     conf = max(0.0, min(1.0, float(parsed.get("confianza") or 0.0)))
     requiere_revision = bool(parsed.get("requiere_revision", conf < 0.75))
     if conf < 0.75:
         requiere_revision = True
 
-    com_raw = parsed.get("comercio")
-    comercio = com_raw if (com_raw and str(com_raw).lower() not in {"null", "none", ""}) else None
-
     pregunta = parsed.get("pregunta_sugerida")
     if pregunta and str(pregunta).lower() in {"null", "none", ""}:
         pregunta = None
+
+    # Validación de cat/sub contra la taxonomía.
+    # Si el usuario dio un hint, respetar lo que el LLM devolvió aunque sea una
+    # cat/sub nueva (es probablemente intencional). Si no hubo hint, forzar a la
+    # taxonomía conocida para no inventar.
+    if cat not in TAXONOMY:
+        if hint and cat:
+            log.info(f"Categoría nueva propuesta vía hint: {cat!r}. Aceptando tal cual.")
+            requiere_revision = True
+            if not pregunta:
+                pregunta = (
+                    f"Categoría NUEVA propuesta: «{cat}». No está en la taxonomía actual. "
+                    f"¿La quieres usar así o prefieres mapearla a una existente?"
+                )
+        else:
+            cat = "Otros ingresos" if amount > 0 else "Otros"
+            sub = "Ingresos extraordinarios" if amount > 0 else "Gastos no clasificados"
+    elif sub not in TAXONOMY[cat]:
+        if cat in EXTENSIBLE_CATEGORIES and sub:
+            # categorías extensibles (ej. Gastos por rendir) aceptan subcat libre.
+            log.info(f"Subcategoría libre aceptada para {cat}: {sub!r}")
+        elif hint and sub:
+            # El usuario dio una pista que indujo una subcat nueva. Aceptamos
+            # tal cual y pedimos confirmación al usuario (sin mapear a 'parecida').
+            log.info(f"Subcategoría NUEVA inducida por hint en {cat}: {sub!r}")
+            requiere_revision = True
+            if not pregunta:
+                similares = ", ".join(TAXONOMY[cat][:5])
+                pregunta = (
+                    f"Sub-categoría NUEVA propuesta: «{sub}» dentro de «{cat}». "
+                    f"¿La uso así o prefieres mapear a una existente como: {similares}?"
+                )
+        else:
+            sub = TAXONOMY[cat][0]
+
+    com_raw = parsed.get("comercio")
+    comercio = com_raw if (com_raw and str(com_raw).lower() not in {"null", "none", ""}) else None
 
     return Classification(
         category=cat,
