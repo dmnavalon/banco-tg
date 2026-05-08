@@ -16,7 +16,6 @@ from .base import (
     click_first,
     fill_first,
     first_visible,
-    read_table_rows,
 )
 
 log = get_logger("adapters.bancochile")
@@ -46,13 +45,12 @@ SEL_CAPTCHA_FILLED = [
     ".captcha-container img[src]",
 ]
 
-SEL_TABLE = [
-    "table",
-    '[class*="movimiento"] table',
-    '[class*="transaction"]',
-    '[class*="listado"] table',
-    '[class*="saldo"] table',
-]
+# Tabla real renderizada por Angular Material/CDK. El selector genérico "table"
+# matcheaba elementos del header/sidebar antes que la tabla real, por eso
+# hay que apuntar a la clase específica `bch-table`.
+SEL_TABLE_ROW = "table.bch-table tbody tr.bch-row:not(.table-collapse-row)"
+SEL_TABLE_CONTAINER = "table.bch-table"
+SEL_NEXT_PAGE = "button.mat-paginator-navigation-next"
 
 SEL_OTP_INPUT = [
     'input[autocomplete="one-time-code"]',
@@ -131,85 +129,112 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
     raise LoginFailed(f"Banco de Chile no avanzó al dashboard tras login. URL actual: {page.url}")
 
 
-def fetch_movements(page: Page) -> list[dict]:
-    log.info("Navegando directo a saldos-movimientos de Banco de Chile…")
-    page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
+def _read_current_page(page: Page) -> list[dict]:
+    """Lee la página visible actual de la tabla bch-table.
 
-    # Espera activa: hasta 40s a que aparezca alguna tabla (SPA carga async)
-    table_sel = ", ".join(SEL_TABLE)
-    try:
-        page.wait_for_selector(table_sel, state="attached", timeout=40000)
-        page.wait_for_timeout(2000)  # deja que las filas se pueblen
-    except PWTimeout:
-        raise ScraperBroken("No encontré tabla de movimientos en Banco de Chile.")
+    BCh usa Angular Material CDK con clases tipo `cdk-column-fechaContable`,
+    `cdk-column-descripcion`, `cdk-column-cargo`, `cdk-column-abono`. Apuntamos
+    directo a esas clases en vez de heurísticas por header text.
 
-    table = read_table_rows(page, SEL_TABLE)
-    if not table:
-        raise ScraperBroken("No encontré tabla de movimientos en Banco de Chile.")
-
-    log.info(f"Tabla BCh: {len(table['headers'])} columnas, {len(table['rows'])} filas.")
-
-    movements: list[dict] = []
-    for cells in table["rows"]:
-        mov = _parse_row(cells, table["headers"])
+    Saltamos las filas con clase `table-collapse-row` que son filas vacías de
+    animación de detalle expandible.
+    """
+    rows_loc = page.locator(SEL_TABLE_ROW)
+    n = rows_loc.count()
+    log.info(f"BCh: {n} filas detectadas en página actual")
+    results: list[dict] = []
+    for i in range(n):
+        row = rows_loc.nth(i)
+        try:
+            fecha = row.locator("td.cdk-column-fechaContable").first.inner_text().strip()
+            descripcion = row.locator("td.cdk-column-descripcion").first.inner_text().strip()
+            cargo = row.locator("td.cdk-column-cargo").first.inner_text().strip()
+            abono = row.locator("td.cdk-column-abono").first.inner_text().strip()
+        except Exception as e:
+            log.warning(f"BCh fila {i}: error leyendo celdas: {e}")
+            continue
+        mov = _parse_row(fecha, descripcion, cargo, abono)
         if mov:
-            movements.append(mov)
-
-    log.info(f"Banco de Chile: {len(movements)} movimientos parseados.")
-    return movements
+            results.append(mov)
+    return results
 
 
-def _parse_row(cells: list[str], headers: list[str]) -> dict | None:
-    """Parser genérico basado en headers (fecha, descripción, monto/cargo/abono, saldo)."""
-    if len(cells) < 2:
+def _parse_row(fecha: str, descripcion: str, cargo: str, abono: str) -> dict | None:
+    """Parsea una fila de la cuenta corriente de BCh.
+
+    BCh muestra cargo y abono en columnas separadas: una de las dos viene vacía.
+    Si la celda de cargo trae monto → es un egreso (negativo). Si la de abono
+    trae monto → es un ingreso (positivo).
+    """
+    if not fecha or not descripcion:
         return None
 
-    date_iso: str | None = None
-    description: str | None = None
-    amount: float | None = None
-    movement_type: str | None = None
+    cargo_val = parse_clp_amount(cargo) if cargo.strip() else None
+    abono_val = parse_clp_amount(abono) if abono.strip() else None
 
-    for i, cell in enumerate(cells):
-        cell = (cell or "").strip()
-        header = (headers[i] if i < len(headers) else "").lower()
-        if "fecha" in header or re.match(r"^\d{2}[/\-]\d{2}[/\-]\d{2,4}$", cell):
-            date_iso = parse_chilean_date(cell)
-        elif "descripci" in header or "detalle" in header or "glosa" in header:
-            description = cell
-        elif "cargo" in header:
-            value = parse_clp_amount(cell)
-            if value is not None:
-                amount = -abs(value)
-                movement_type = "cargo"
-        elif "abono" in header:
-            value = parse_clp_amount(cell)
-            if value is not None:
-                amount = abs(value)
-                movement_type = "abono"
-        elif "monto" in header:
-            value = parse_clp_amount(cell)
-            if value is not None and amount is None:
-                amount = value
-                movement_type = "abono" if value >= 0 else "cargo"
-
-    if not description:
-        for cell in cells[1:]:
-            cell = (cell or "").strip()
-            if (
-                len(cell) > 3
-                and not re.fullmatch(r"\$?[\d.,\-]+", cell)
-                and not re.match(r"^\d{2}[/\-]\d{2}", cell)
-            ):
-                description = cell
-                break
-
-    if not description or amount is None or not date_iso:
+    if cargo_val is not None and cargo_val > 0:
+        amount = -abs(cargo_val)
+        movement_type = "cargo"
+    elif abono_val is not None and abono_val > 0:
+        amount = abs(abono_val)
+        movement_type = "abono"
+    else:
+        # Ninguna columna trajo monto válido — fila no parseable.
         return None
 
     return {
-        "date": date_iso,
-        "description": description,
+        "date": parse_chilean_date(fecha),
+        "description": descripcion,
         "amount": amount,
         "movement_type": movement_type,
         "account": "bancochile",
     }
+
+
+def _go_to_next_page(page: Page) -> bool:
+    """Click en el botón 'siguiente página' del paginador Material si está habilitado.
+    Retorna True si avanzó; False si era la última página."""
+    try:
+        next_btn = page.locator(SEL_NEXT_PAGE).first
+        if not next_btn.is_visible(timeout=1500):
+            return False
+        if next_btn.is_disabled():
+            return False
+        next_btn.click(timeout=3000)
+        page.wait_for_timeout(2000)  # esperar render de la nueva página
+        return True
+    except Exception as e:
+        log.info(f"BCh: sin siguiente página o falló avanzar: {type(e).__name__}: {e}")
+        return False
+
+
+def fetch_movements(page: Page) -> list[dict]:
+    log.info("Navegando directo a saldos-movimientos de Banco de Chile…")
+    page.goto(MOVEMENTS_URL, wait_until="domcontentloaded", timeout=30000)
+
+    # La SPA carga async. Esperamos a que aparezca al menos una fila real
+    # (no una table-collapse-row, esas son filas-fantasma de animación).
+    try:
+        page.wait_for_selector(SEL_TABLE_ROW, state="attached", timeout=40000)
+        page.wait_for_timeout(2000)
+    except PWTimeout:
+        raise ScraperBroken("No encontré tabla de movimientos en Banco de Chile.")
+
+    movements: list[dict] = []
+    page_num = 1
+    max_pages = 50  # safety guard contra loop infinito si el paginador se rompe
+    while page_num <= max_pages:
+        log.info(f"Procesando página {page_num} de movimientos BCh…")
+        rows = _read_current_page(page)
+        if not rows:
+            log.info(f"Página {page_num} sin filas. Cortando.")
+            break
+        log.info(f"Página {page_num}: {len(rows)} movimientos parseados")
+        movements.extend(rows)
+        if not _go_to_next_page(page):
+            log.info(f"Última página de BCh ({page_num}). Total: {len(movements)} movimientos.")
+            break
+        page_num += 1
+
+    log.info(f"Banco de Chile: {len(movements)} movimientos totales.")
+    return movements
