@@ -558,8 +558,9 @@ def _handle_correction_reply(text: str, chat_id: str, pending: dict, prompt_msg_
 
 def _handle_greeting() -> None:
     try:
-        rows = db.get_all_pending()
-        if not rows:
+        pendientes = db.get_all_pending()
+        ignoradas = db.get_ignored()
+        if not pendientes and not ignoradas:
             _send(
                 "👋 Hola, Diego.\n\n"
                 "✅ Todo al día por ahora.\n"
@@ -568,10 +569,18 @@ def _handle_greeting() -> None:
             )
             return
 
-        n = len(rows)
-        plural = "s" if n != 1 else ""
-        _send(f"👋 Hola, Diego.\n\nTienes {n} movimiento{plural} pendiente{plural} de revisión:")
-        movs = list(rows)
+        n_p = len(pendientes)
+        n_i = len(ignoradas)
+        if n_p and n_i:
+            saludo = f"👋 Hola, Diego.\n\nTienes {n_p} pendiente{'s' if n_p != 1 else ''} + {n_i} ignorada{'s' if n_i != 1 else ''} en cola:"
+        elif n_p:
+            plural = "s" if n_p != 1 else ""
+            saludo = f"👋 Hola, Diego.\n\nTienes {n_p} movimiento{plural} pendiente{plural} de revisión:"
+        else:
+            plural = "s" if n_i != 1 else ""
+            saludo = f"👋 Hola, Diego.\n\nSin pendientes nuevos. Te reenvío {n_i} ignorada{plural} por si querés re-categorizar:"
+        _send(saludo)
+        movs = list(pendientes) + list(ignoradas)
         _ensure_classified(movs)
         telegram_notify.send_movement_cards(movs)
     except Exception as e:
@@ -693,17 +702,22 @@ def _send_next_page() -> None:
 
 def _resend_pending() -> None:
     try:
-        rows = db.get_pending()
-        if not rows:
-            _send("Sin pendientes.")
+        pendientes = db.get_pending()
+        ignoradas = db.get_ignored()
+        if not pendientes and not ignoradas:
+            _send("Sin pendientes ni ignoradas.")
             return
-        # Reusamos el dict completo de Firestore para que `send_movement_cards`
-        # tenga acceso a tg_photo_file_id, persona, y cualquier campo nuevo que
-        # se agregue al modelo en el futuro sin tener que actualizar este loop.
-        movs = list(rows)
-        # Clasificar on-demand los que quedaron sin categoría (ej. el daily se
-        # cortó con DeadlineExceeded antes de clasificarlos).
+        # Cola: pendientes primero, ignoradas al final. La paginación de 5
+        # rellena con ignoradas solo cuando se acaban los pendientes — exactamente
+        # lo que pediste: si hay 3 pendientes y N ignoradas, la primera tanda
+        # de 5 son [3 pendientes, 2 ignoradas].
+        movs = list(pendientes) + list(ignoradas)
+        # Clasificar on-demand los que quedaron sin categoría.
         _ensure_classified(movs)
+        if pendientes and ignoradas:
+            _send(f"📋 {len(pendientes)} pendientes + {len(ignoradas)} ignoradas en cola.")
+        elif ignoradas:
+            _send(f"Sin pendientes nuevos. Reenviando {len(ignoradas)} ignoradas (por si querés re-categorizarlas).")
         telegram_notify.send_daily_batch(movs)
     except Exception as e:
         db.record_error("bot.pending", str(e), traceback.format_exc())

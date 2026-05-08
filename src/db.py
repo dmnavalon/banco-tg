@@ -190,6 +190,15 @@ def get_all_pending() -> list[dict]:
     return rows
 
 
+def get_ignored() -> list[dict]:
+    """Movimientos con status=ignorado, ordenados por fecha desc.
+    Se reenvían al final de la cola en /pending por si Diego se arrepiente."""
+    docs = _db().collection("movements").where("status", "==", "ignorado").get()
+    rows = [d.to_dict() for d in docs]
+    rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
+    return rows
+
+
 def get_movements_by_ids(ids: list[str]) -> list[dict]:
     if not ids:
         return []
@@ -209,14 +218,21 @@ def update_decision(
     final_category: str | None,
     final_subcategory: str | None,
     decided_by: str,
+    ignore_reason: str | None = None,
 ) -> None:
-    _db().collection("movements").document(mov_id).update({
+    payload: dict = {
         "status": status,
         "final_category": final_category,
         "final_subcategory": final_subcategory,
         "decided_by": decided_by,
         "decided_at": _now(),
-    })
+    }
+    # Solo seteamos ignore_reason cuando se ignora; en aprobar/corregir no lo
+    # tocamos para no pisar una razón previa (útil si el usuario reactiva un
+    # ignorado, queda registro histórico de por qué lo había ignorado antes).
+    if status == "ignorado":
+        payload["ignore_reason"] = ignore_reason
+    _db().collection("movements").document(mov_id).update(payload)
 
 
 def get_last_movements(limit: int = 10) -> list[dict]:
@@ -476,25 +492,62 @@ def set_browser_state(bank: str, state_json: str) -> None:
     })
 
 
-# ── pending_corrections (Force Reply) ──────────────────────────────────────
-# Cuando el usuario apreta "✏️ Corregir", el bot manda un mensaje con
-# force_reply y guarda aquí el mapping message_id → mov_id, para que cuando
-# el usuario responda (con reply_to_message_id) el bot sepa qué movimiento
-# corregir, sin importar cuántas correcciones tenga simultáneamente.
+# ── pending_user_actions (Force Reply genérico) ────────────────────────────
+# Cuando el usuario apreta "✏️ Corregir" o "🚫 Ignorar", el bot manda un mensaje
+# con force_reply y guarda aquí el mapping `prompt_message_id → (mov_id, action)`,
+# para que cuando responda (con reply_to_message_id) el bot sepa qué movimiento
+# es y qué hacer (corregir vs ignorar con razón).
 
-def save_pending_correction(prompt_message_id: str, mov_id: str, chat_id: str, original_card_message_id: int | None = None) -> None:
-    _db().collection("pending_corrections").document(prompt_message_id).set({
+def save_pending_user_action(
+    prompt_message_id: str,
+    mov_id: str,
+    chat_id: str,
+    action: str,                       # "correct" | "ignore"
+    original_card_message_id: int | None = None,
+) -> None:
+    _db().collection("pending_user_actions").document(prompt_message_id).set({
         "mov_id": mov_id,
         "chat_id": chat_id,
+        "action": action,
         "original_card_message_id": original_card_message_id,
         "created_at": _now(),
     })
 
 
+def get_pending_user_action(prompt_message_id: str) -> dict | None:
+    """Devuelve el dict con `action` ('correct' o 'ignore'), `mov_id`, etc.
+    Para retro-compat, también busca en la collection vieja `pending_corrections`
+    y asume `action="correct"` si la encuentra ahí."""
+    snap = _db().collection("pending_user_actions").document(prompt_message_id).get()
+    if snap.exists:
+        return snap.to_dict()
+    # Retro-compat con la collection vieja: si todavía hay docs ahí, los
+    # tratamos como correct.
+    legacy = _db().collection("pending_corrections").document(prompt_message_id).get()
+    if legacy.exists:
+        d = legacy.to_dict()
+        d.setdefault("action", "correct")
+        return d
+    return None
+
+
+def delete_pending_user_action(prompt_message_id: str) -> None:
+    _db().collection("pending_user_actions").document(prompt_message_id).delete()
+    # Best-effort: si quedó en la legacy, limpiar también.
+    try:
+        _db().collection("pending_corrections").document(prompt_message_id).delete()
+    except Exception:
+        pass
+
+
+# Aliases retrocompatibles para call sites que aún usan los nombres viejos.
+def save_pending_correction(prompt_message_id: str, mov_id: str, chat_id: str, original_card_message_id: int | None = None) -> None:
+    save_pending_user_action(prompt_message_id, mov_id, chat_id, "correct", original_card_message_id)
+
+
 def get_pending_correction(prompt_message_id: str) -> dict | None:
-    snap = _db().collection("pending_corrections").document(prompt_message_id).get()
-    return snap.to_dict() if snap.exists else None
+    return get_pending_user_action(prompt_message_id)
 
 
 def delete_pending_correction(prompt_message_id: str) -> None:
-    _db().collection("pending_corrections").document(prompt_message_id).delete()
+    delete_pending_user_action(prompt_message_id)
