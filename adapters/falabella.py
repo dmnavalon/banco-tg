@@ -395,11 +395,19 @@ def fetch_movements(page: Page) -> list[dict]:
 def _parse_row(cells: list[str]) -> dict | None:
     """Parsea una fila del Estado de Cuenta de Falabella.
 
-    Columnas reales: Fecha (DD/MM/YYYY), Descripción, Persona, Monto,
+    Columnas reales: Fecha (DD/MM/YYYY), Descripción, Persona, Monto total,
     Cuotas, Cuota a pagar, Cambio cuotas, Vacío.
 
-    Devuelve `persona` como campo separado en el dict (Titular / Adicional / nombre)
-    en vez de inyectarlo en la descripción. La descripción mantiene solo la cuota.
+    Devuelve `persona` como campo separado (Titular / Adicional / nombre del
+    adicional) en vez de inyectarlo en la descripción. La descripción mantiene
+    "(X/N)" como sufijo para identificación rápida.
+
+    Para compras en cuotas (cuotas_total > 1), persiste:
+      - cuotas_actual: nº de cuota actual (ej. 2)
+      - cuotas_total: total de cuotas (ej. 12)
+      - cuota_monto: monto de la cuota mensual (ej. 51232) — lo que efectivamente
+        sale ese mes, distinto del monto total de la compra original.
+    Para 1/1 (sin cuotas), los 3 campos quedan None.
     """
     if len(cells) < 4:
         return None
@@ -407,21 +415,40 @@ def _parse_row(cells: list[str]) -> dict | None:
     descripcion = (cells[1] or "").strip()
     persona = (cells[2] or "").strip() if len(cells) > 2 else ""
     monto_raw = (cells[3] or "").strip()
-    cuotas = (cells[4] or "").strip() if len(cells) > 4 else ""
+    cuotas_raw = (cells[4] or "").strip() if len(cells) > 4 else ""
+    cuota_monto_raw = (cells[5] or "").strip() if len(cells) > 5 else ""
 
     if not fecha or not descripcion:
         return None
 
-    monto = parse_clp_amount(monto_raw) or 0.0
+    monto_total = parse_clp_amount(monto_raw) or 0.0
+
+    # Parse cuotas "X/N" o "XX/NN" → (cuotas_actual, cuotas_total).
+    cuotas_actual: int | None = None
+    cuotas_total: int | None = None
+    cuota_monto: float | None = None
+    m = re.fullmatch(r"\s*(\d+)\s*/\s*(\d+)\s*", cuotas_raw)
+    if m:
+        cuotas_actual = int(m.group(1))
+        cuotas_total = int(m.group(2))
+        # Solo enriquecer cuota_monto cuando hay cuotas reales (N>1). En 1/1
+        # la "cuota a pagar" es igual al monto total y agregar el campo solo
+        # genera ruido en el GSheet.
+        if cuotas_total > 1 and cuota_monto_raw:
+            cuota_monto = parse_clp_amount(cuota_monto_raw)
+
     desc = descripcion
-    if cuotas and cuotas != "/":
-        desc = f"{desc} ({cuotas})"
+    if cuotas_raw and cuotas_raw != "/":
+        desc = f"{desc} ({cuotas_raw})"
 
     return {
         "date": parse_chilean_date(fecha),
         "description": desc,
-        "amount": -abs(monto),
+        "amount": -abs(monto_total),
         "movement_type": "cargo",
         "account": "falabella",
         "persona": persona or None,
+        "cuotas_actual": cuotas_actual,
+        "cuotas_total": cuotas_total,
+        "cuota_monto": -abs(cuota_monto) if cuota_monto else None,
     }

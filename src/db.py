@@ -96,6 +96,9 @@ def insert_movement(
     requiere_revision: bool = False,
     pregunta_sugerida: str | None = None,
     persona: str | None = None,
+    cuotas_actual: int | None = None,
+    cuotas_total: int | None = None,
+    cuota_monto: float | None = None,
 ) -> bool:
     ref = _db().collection("movements").document(mov_id)
     if _with_retry(lambda: ref.get().exists):
@@ -118,6 +121,9 @@ def insert_movement(
         "requiere_revision": requiere_revision,
         "pregunta_sugerida": pregunta_sugerida,
         "persona": persona,
+        "cuotas_actual": cuotas_actual,
+        "cuotas_total": cuotas_total,
+        "cuota_monto": cuota_monto,
         "status": "pendiente",
         "final_category": None,
         "final_subcategory": None,

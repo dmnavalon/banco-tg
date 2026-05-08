@@ -124,6 +124,9 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
             bank=bank,
             raw_blob=json.dumps(raw, ensure_ascii=False),
             persona=raw.get("persona"),
+            cuotas_actual=raw.get("cuotas_actual"),
+            cuotas_total=raw.get("cuotas_total"),
+            cuota_monto=raw.get("cuota_monto"),
         )
         if inserted:
             new_movements.append({
@@ -135,6 +138,9 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
                 "account": raw.get("account") or bank,
                 "bank": bank,
                 "persona": raw.get("persona"),
+                "cuotas_actual": raw.get("cuotas_actual"),
+                "cuotas_total": raw.get("cuotas_total"),
+                "cuota_monto": raw.get("cuota_monto"),
                 "screenshot_bytes": screenshot_bytes,
             })
 

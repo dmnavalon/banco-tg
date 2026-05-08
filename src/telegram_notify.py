@@ -418,6 +418,19 @@ def _movement_card_text(mov: dict) -> str:
     sub_str = f" → {sub_emoji} {_esc(sub)}" if sub else ""
     persona_line = f"\n👤 <b>Persona:</b> {persona}" if persona else ""
 
+    # Línea de cuotas: solo si la compra tiene >1 cuota. La "cuota a pagar"
+    # es la mensualidad real que sale ese mes — distinta del Monto total.
+    cuotas_actual = mov.get("cuotas_actual")
+    cuotas_total = mov.get("cuotas_total")
+    cuota_monto = mov.get("cuota_monto")
+    cuotas_line = ""
+    if cuotas_total and cuotas_total > 1:
+        if cuota_monto:
+            cuota_str = _esc(format_clp(abs(cuota_monto)))
+            cuotas_line = f"\n💳 <b>Cuota:</b> {cuotas_actual} de {cuotas_total} · {cuota_str}/mes"
+        else:
+            cuotas_line = f"\n💳 <b>Cuota:</b> {cuotas_actual} de {cuotas_total}"
+
     lines = [
         header,
         "",
@@ -425,7 +438,7 @@ def _movement_card_text(mov: dict) -> str:
         f"📅 <b>Fecha:</b> {fecha}",
         f"📝 <b>Descripción:</b> <code>{desc_raw}</code>",
         f"🏪 <b>Comercio:</b> {comercio}",
-        f"💸 <b>Monto:</b> {amount_str}{persona_line}",
+        f"💸 <b>Monto:</b> {amount_str}{persona_line}{cuotas_line}",
         "",
         f"🏷️ <b>Categoría propuesta</b>",
         f"{cat_emoji} {_esc(cat)}{sub_str}",

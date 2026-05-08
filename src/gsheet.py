@@ -18,12 +18,20 @@ SHEET_NAME = "Movimientos"
 
 _DAYS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-# Header oficial del sheet — 13 columnas. Si lo cambias, sincroniza la fila 1 del sheet.
+# Header oficial del sheet — 16 columnas. Si lo cambias, sincroniza la fila 1 del sheet
+# (ver scripts/extend_sheet_header.py para extender preservando las filas existentes).
+#
+# Las 3 últimas columnas son metadata de cuotas:
+#   Cuota actual: nº de la cuota que se paga este mes (ej. 2 si "02/12")
+#   Cuotas total: total de cuotas del crédito (ej. 12)
+#   Cuota a pagar: monto de la cuota mensual (lo que sale ese mes — distinto de Monto total)
+# Solo se llenan en compras a más de 1 cuota; en compras "1/1" quedan vacías.
 SHEET_HEADER = [
     "Fecha", "Día", "Mes", "Año", "Día Semana",
     "Banco", "Persona",
     "Descripción", "Monto", "Tipo", "Saldo",
     "Categoría", "Subcategoría",
+    "Cuota actual", "Cuotas total", "Cuota a pagar",
 ]
 
 
@@ -140,13 +148,25 @@ def upsert_movement(mov: dict) -> None:
         persona = _normalize_persona(mov.get("persona"))
         descripcion = mov.get("description") or ""
 
+        # Metadata de cuotas (solo se llena cuando hay >1 cuota).
+        cuotas_actual = mov.get("cuotas_actual")
+        cuotas_total = mov.get("cuotas_total")
+        cuota_monto = mov.get("cuota_monto")
+        cuota_actual_cell = cuotas_actual if (cuotas_total and cuotas_total > 1) else ""
+        cuotas_total_cell = cuotas_total if (cuotas_total and cuotas_total > 1) else ""
+        cuota_pagar_cell = abs(cuota_monto) if (cuota_monto and cuotas_total and cuotas_total > 1) else ""
+
         existing_row = _find_existing_row(sheet, fecha, descripcion, monto_abs)
 
         if existing_row:
-            # Solo actualizamos Categoría (col 12) y Subcategoría (col 13).
-            # Tomamos rango L..M de la fila existente para hacer un update batched.
-            cell_range = f"L{existing_row}:M{existing_row}"
-            sheet.update(cell_range, [[cat, sub]], value_input_option="USER_ENTERED")
+            # Actualizamos Categoría (L), Subcategoría (M) y las 3 columnas de cuotas
+            # (N, O, P). El resto del row se preserva. Hacemos dos updates separados
+            # por contigüidad de rango.
+            sheet.update(
+                f"L{existing_row}:P{existing_row}",
+                [[cat, sub, cuota_actual_cell, cuotas_total_cell, cuota_pagar_cell]],
+                value_input_option="USER_ENTERED",
+            )
             log.info(f"GSheet UPDATE row {existing_row}: {fecha} · {descripcion[:40]} → {cat}/{sub}")
         else:
             row = [
@@ -163,6 +183,9 @@ def upsert_movement(mov: dict) -> None:
                 "",                                            # 11. Saldo (vacío, no disponible)
                 cat,                                           # 12. Categoría
                 sub,                                           # 13. Subcategoría
+                cuota_actual_cell,                             # 14. Cuota actual
+                cuotas_total_cell,                             # 15. Cuotas total
+                cuota_pagar_cell,                              # 16. Cuota a pagar
             ]
             sheet.append_row(row, value_input_option="USER_ENTERED")
             log.info(f"GSheet APPEND: {fecha} · {descripcion[:40]} → {cat}/{sub}")
