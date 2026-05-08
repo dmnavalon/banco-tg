@@ -185,6 +185,19 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
     except PWTimeout:
         log.warning(f"No llegó al dashboard en 20s tras submit. URL: {page.url}")
         _log_state(page, "post-submit-no-dashboard")
+        # Detectar el mensaje específico de credenciales rechazadas para dar
+        # un error accionable en vez del genérico "no avanzó al dashboard".
+        try:
+            body_text = page.evaluate("() => (document.body ? document.body.innerText : '')").lower()
+        except Exception:
+            body_text = ""
+        if "datos ingresados no son correctos" in body_text or "rut o contraseña" in body_text or "clave incorrecta" in body_text:
+            raise LoginFailed(
+                "Banco de Chile rechazó las credenciales (mensaje del banco: "
+                "«Los datos ingresados no son correctos»). Verifica con /forget bancochile "
+                "y /cred bancochile que el RUT esté en formato 12345678-9 sin puntos y la "
+                "clave sea exactamente la que usás en el portal manualmente."
+            )
 
     otp_input = first_visible(page, SEL_OTP_INPUT, timeout_ms=3000)
     if otp_input:
