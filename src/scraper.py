@@ -100,17 +100,25 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
             finally:
                 browser.close()
 
+    # Contar duplicados (mismo date+amount+description+account) para asignar un
+    # `dup_idx` y diferenciar dos compras idénticas el mismo día. La primera
+    # ocurrencia mantiene `dup_idx=0` para preservar hashes históricos.
+    dup_counts: dict[tuple, int] = {}
     new_movements: list[dict] = []
     for raw in raw_movements:
         if not raw or not raw.get("date") or not raw.get("description"):
             continue
         amount = float(raw.get("amount") or 0.0)
+        dup_key = (raw["date"], amount, raw["description"], raw.get("account") or bank)
+        dup_idx = dup_counts.get(dup_key, 0)
+        dup_counts[dup_key] = dup_idx + 1
         mid = movement_id(
             date_iso=raw["date"],
             amount=amount,
             description=raw["description"],
             bank=bank,
             account=raw.get("account") or bank,
+            dup_idx=dup_idx,
         )
         # raw_blob se serializa a JSON: extraer los bytes del screenshot antes (no son JSON-friendly).
         screenshot_bytes = raw.pop("screenshot_bytes", None) if isinstance(raw, dict) else None
@@ -127,6 +135,7 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
             cuotas_actual=raw.get("cuotas_actual"),
             cuotas_total=raw.get("cuotas_total"),
             cuota_monto=raw.get("cuota_monto"),
+            saldo=raw.get("saldo"),
         )
         if inserted:
             new_movements.append({
@@ -141,6 +150,7 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
                 "cuotas_actual": raw.get("cuotas_actual"),
                 "cuotas_total": raw.get("cuotas_total"),
                 "cuota_monto": raw.get("cuota_monto"),
+                "saldo": raw.get("saldo"),
                 "screenshot_bytes": screenshot_bytes,
             })
 

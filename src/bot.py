@@ -106,6 +106,9 @@ def _send(text: str) -> None:
     telegram_notify.send_message(text)
 
 
+_UNAUTHORIZED_NOTIFIED: set[str] = set()
+
+
 def _handle_message(msg: dict[str, Any]) -> None:
     chat = msg.get("chat") or {}
     chat_id = str(chat.get("id", ""))
@@ -115,6 +118,23 @@ def _handle_message(msg: dict[str, Any]) -> None:
     authorized = _authorized_chat_id()
     if chat_id != authorized:
         log.warning(f"Mensaje de chat no autorizado: {chat_id}. Ignorando.")
+        # Avisar a Diego una vez por chat_id sospechoso (memoria por proceso).
+        # Evita spam si alguien escribe muchas veces, pero la primera alerta llega.
+        if chat_id and chat_id not in _UNAUTHORIZED_NOTIFIED:
+            _UNAUTHORIZED_NOTIFIED.add(chat_id)
+            sender = msg.get("from") or {}
+            sender_info = (
+                f"id={sender.get('id')}, username=@{sender.get('username') or '?'}, "
+                f"first_name={sender.get('first_name') or '?'}"
+            )
+            try:
+                telegram_notify.send_message(
+                    f"⚠️ Intento de acceso desde chat NO autorizado:\n"
+                    f"chat_id: {chat_id}\nfrom: {sender_info}\n"
+                    f"Texto: {text[:80]!r}"
+                )
+            except Exception:
+                pass
         return
 
     db.record_telegram_log(
@@ -228,6 +248,16 @@ def _handle_command(text: str, chat_id: str) -> None:
         bank = args[0].lower()
         if bank not in VALID_BANKS:
             _send(f"Banco no soportado. Opciones: {', '.join(VALID_BANKS)}")
+            return
+        # BCh tiene anti-bot que detecta headless en cloud (Railway). El daily
+        # de BCh corre solo en la Mac vía launchd. Bloqueamos /test bancochile
+        # cuando el bot está en Railway para evitar el ScraperBroken garantizado.
+        if bank == "bancochile" and _running_in_cloud():
+            _send(
+                "⚠️ BCh no funciona desde Railway (anti-bot detecta headless cloud).\n"
+                "Corré desde la Mac:\n"
+                "  cd \"Gestión de Gastos\" && source .venv/bin/activate && python -m src.run_daily"
+            )
             return
         threading.Thread(target=_run_test_in_thread, args=(bank,), daemon=True).start()
         _send(f"[{bank}] Iniciando scrape en background…")
@@ -349,9 +379,11 @@ def _handle_callback(callback: dict[str, Any]) -> None:
         # ✅ en dos tarjetas duplicadas que el bot envió por error), no volver a
         # llamar upsert_movement — eso evita el race condition con read-after-write
         # del Google Sheets API que produce filas duplicadas en el sheet.
+        amount = float(mov.get("amount") or 0)
+        default_cat = "Otros ingresos" if amount > 0 else "Otros"
         if mov.get("status") == "aprobado":
             log.info(f"approve duplicado ignorado para mov {mov_id} (ya estaba aprobado)")
-            cat = mov.get("final_category") or mov.get("suggested_category") or "Otro"
+            cat = mov.get("final_category") or mov.get("suggested_category") or default_cat
             sub = mov.get("final_subcategory") or mov.get("suggested_subcategory")
             label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
             if message_id:
@@ -361,13 +393,21 @@ def _handle_callback(callback: dict[str, Any]) -> None:
                            keyboard=_correct_again_keyboard(mov_id))
             return
 
-        cat = mov.get("suggested_category") or "Otro"
+        cat = mov.get("suggested_category") or default_cat
         sub = mov.get("suggested_subcategory")
-        db.update_decision(mov_id, status="aprobado", final_category=cat, final_subcategory=sub, decided_by=chat_id)
+        # Primero GSheet — si falla, NO actualizamos Firestore para que el mov
+        # siga `pendiente` y Diego pueda reintentar. Antes el orden invertido
+        # dejaba el mov `aprobado` sin fila en GSheet (estado fantasma).
         try:
             gsheet.upsert_movement({**mov, "final_category": cat, "final_subcategory": sub})
         except Exception as e:
             log.warning(f"gsheet.upsert_movement falló: {e}")
+            if message_id:
+                from .telegram_notify import _movement_card_text
+                _edit_card(chat_id, message_id, mov,
+                           f"{_movement_card_text(mov)}\n\n⚠️ <b>GSheet falló:</b> {_hesc(str(e)[:120])}\nReintenta cuando puedas.")
+            return
+        db.update_decision(mov_id, status="aprobado", final_category=cat, final_subcategory=sub, decided_by=chat_id)
         label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
         if message_id:
             from .telegram_notify import _movement_card_text

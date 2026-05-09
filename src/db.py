@@ -6,6 +6,11 @@ import time
 from datetime import datetime
 from typing import Any
 
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo  # type: ignore[no-redef]
+
 # gRPC se ensucia con FDs heredados cuando Playwright forkea procesos hijos
 # (Chromium). Síntoma: `DeadlineExceeded: 504` aleatorio en operaciones Firestore
 # durante/después del scrape. Las env vars hay que setearlas ANTES del import
@@ -41,8 +46,14 @@ def init_if_needed() -> None:
     _db()
 
 
+_TZ_SANTIAGO = ZoneInfo("America/Santiago")
+
+
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    """Devuelve timestamp en America/Santiago. Mantenerlo consistente entre
+    Mac (TZ local CLT) y Railway (TZ UTC) evita que comparaciones cross-host
+    queden desfasadas."""
+    return datetime.now(tz=_TZ_SANTIAGO).strftime("%Y-%m-%d %H:%M:%S")
 
 
 _TRANSIENT_GRPC = (
@@ -99,10 +110,9 @@ def insert_movement(
     cuotas_actual: int | None = None,
     cuotas_total: int | None = None,
     cuota_monto: float | None = None,
+    saldo: float | None = None,
 ) -> bool:
     ref = _db().collection("movements").document(mov_id)
-    if _with_retry(lambda: ref.get().exists):
-        return False
     payload = {
         "id": mov_id,
         "date": date_iso,
@@ -124,6 +134,7 @@ def insert_movement(
         "cuotas_actual": cuotas_actual,
         "cuotas_total": cuotas_total,
         "cuota_monto": cuota_monto,
+        "saldo": saldo,
         "status": "pendiente",
         "final_category": None,
         "final_subcategory": None,
@@ -133,7 +144,13 @@ def insert_movement(
         "tg_photo_file_id": None,
         "inserted_at": _now(),
     }
-    _with_retry(lambda: ref.set(payload))
+    # `create()` es atómico — falla con AlreadyExists si el doc ya existe.
+    # Reemplaza el patrón read-then-write que tenía race condition entre
+    # procesos concurrentes con el mismo mov_id.
+    try:
+        _with_retry(lambda: ref.create(payload))
+    except gax_exceptions.AlreadyExists:
+        return False
     return True
 
 
@@ -180,9 +197,18 @@ def mark_notified(ids: list[str]) -> None:
     batch.commit()
 
 
+_PENDING_PAGE_SIZE = 500
+
+
 def get_pending() -> list[dict]:
-    """Movimientos pendientes aún no notificados (para el cron diario)."""
-    docs = _db().collection("movements").where("status", "==", "pendiente").get()
+    """Movimientos pendientes aún no notificados (para el cron diario).
+    Limita a `_PENDING_PAGE_SIZE` para no saturar memoria si se acumulan."""
+    docs = (
+        _db().collection("movements")
+        .where("status", "==", "pendiente")
+        .limit(_PENDING_PAGE_SIZE)
+        .get()
+    )
     rows = [d.to_dict() for d in docs if not d.to_dict().get("notified_at")]
     rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
     return rows
@@ -190,7 +216,12 @@ def get_pending() -> list[dict]:
 
 def get_all_pending() -> list[dict]:
     """Todos los movimientos con status=pendiente, hayan sido notificados o no."""
-    docs = _db().collection("movements").where("status", "==", "pendiente").get()
+    docs = (
+        _db().collection("movements")
+        .where("status", "==", "pendiente")
+        .limit(_PENDING_PAGE_SIZE)
+        .get()
+    )
     rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
     return rows
@@ -199,7 +230,12 @@ def get_all_pending() -> list[dict]:
 def get_ignored() -> list[dict]:
     """Movimientos con status=ignorado, ordenados por fecha desc.
     Se reenvían al final de la cola en /pending por si Diego se arrepiente."""
-    docs = _db().collection("movements").where("status", "==", "ignorado").get()
+    docs = (
+        _db().collection("movements")
+        .where("status", "==", "ignorado")
+        .limit(_PENDING_PAGE_SIZE)
+        .get()
+    )
     rows = [d.to_dict() for d in docs]
     rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
     return rows
@@ -253,11 +289,23 @@ def get_last_movements(limit: int = 10) -> list[dict]:
 
 
 def count_pending() -> int:
-    return len(_db().collection("movements").where("status", "==", "pendiente").get())
+    """Usa Firestore aggregate count() — O(1) en costo, no descarga docs."""
+    try:
+        agg = _db().collection("movements").where("status", "==", "pendiente").count().get()
+        # `count().get()` devuelve [[AggregationResult]] — extraer el valor.
+        return int(agg[0][0].value)
+    except Exception:
+        # Fallback al método viejo si el SDK no soporta count() o algo falla.
+        return len(_db().collection("movements").where("status", "==", "pendiente").get())
 
 
 def count_total() -> int:
-    return len(list(_db().collection("movements").get()))
+    """Usa Firestore aggregate count() — O(1) en costo, no descarga docs."""
+    try:
+        agg = _db().collection("movements").count().get()
+        return int(agg[0][0].value)
+    except Exception:
+        return len(list(_db().collection("movements").get()))
 
 
 # ── telegram_log ───────────────────────────────────────────────────────────

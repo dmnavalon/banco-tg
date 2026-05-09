@@ -8,9 +8,28 @@ from datetime import datetime
 import gspread
 from google.oauth2.service_account import Credentials
 
+import re
+
 from .utils import get_logger
 
 log = get_logger("gsheet")
+
+
+def _safe_text(s: str) -> str:
+    """Prefixea con `'` si el string podría interpretarse como fórmula en Sheets.
+    Sheets evalúa cualquier celda que empiece con `=`, `+`, `-`, `@`."""
+    if not s:
+        return s
+    if s[0] in "=+-@":
+        return "'" + s
+    return s
+
+
+def _norm_desc(s: str) -> str:
+    """Normaliza la descripción para comparar filas (case + espacios + NBSP)."""
+    if not s:
+        return ""
+    return re.sub(r"\s+", " ", s.replace(" ", " ")).strip().upper()
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 SPREADSHEET_ID = "1bcH0Hu2_z_yVxZY3BuTkGaDzlsQQZYRCD1ayY-Pb6XM"
@@ -70,14 +89,21 @@ _COL_MONTO = SHEET_HEADER.index("Monto") + 1             # 9
 
 def _find_existing_row(sheet, fecha_dmy: str, descripcion: str, monto_abs: float) -> int | None:
     """Busca el row 1-indexed cuya fila coincida con (fecha DD/MM/YYYY, descripción, monto).
-    Devuelve None si no encuentra. Skipea fila 1 (header)."""
+    Devuelve None si no encuentra. Skipea fila 1 (header).
+
+    Normaliza la descripción (case + espacios + NBSP) para tolerar diferencias
+    accidentales entre el bot y filas escritas por otros procesos."""
     try:
         all_rows = sheet.get_all_values()
     except Exception as e:
         log.warning(f"GSheet get_all_values falló: {e}")
         return None
     target_fecha = (fecha_dmy or "").strip()
-    target_desc = (descripcion or "").strip()
+    target_desc_norm = _norm_desc(descripcion or "")
+    # Si la descripción venía con prefijo `'` (anti-fórmula), el sheet lo guarda
+    # sin él pero `get_all_values` puede devolverlo según contexto. Normalizamos.
+    if target_desc_norm.startswith("'"):
+        target_desc_norm = target_desc_norm[1:]
     # gsheet guarda monto como número; al leer get_all_values vuelve como string.
     # Comparamos como float para evitar problemas con formato (',' vs '.').
     try:
@@ -89,13 +115,15 @@ def _find_existing_row(sheet, fecha_dmy: str, descripcion: str, monto_abs: float
         if len(row) < max(_COL_FECHA, _COL_DESCRIPCION, _COL_MONTO):
             continue
         f = row[_COL_FECHA - 1].strip()
-        d = row[_COL_DESCRIPCION - 1].strip()
+        d_norm = _norm_desc(row[_COL_DESCRIPCION - 1])
+        if d_norm.startswith("'"):
+            d_norm = d_norm[1:]
         m_raw = row[_COL_MONTO - 1].strip().replace(".", "").replace(",", ".")
         try:
             m = float(m_raw)
         except (ValueError, TypeError):
             continue
-        if f == target_fecha and d == target_desc and abs(m - target_monto) < 0.5:
+        if f == target_fecha and d_norm == target_desc_norm and abs(m - target_monto) < 0.5:
             return i
     return None
 
@@ -152,10 +180,10 @@ def upsert_movement(mov: dict) -> None:
         tipo = "Abono" if amount >= 0 else "Cargo"
         monto_abs = abs(amount)
 
-        cat = mov.get("final_category") or mov.get("suggested_category") or ""
-        sub = mov.get("final_subcategory") or mov.get("suggested_subcategory") or ""
+        cat = _safe_text(mov.get("final_category") or mov.get("suggested_category") or "")
+        sub = _safe_text(mov.get("final_subcategory") or mov.get("suggested_subcategory") or "")
         persona = _normalize_persona(mov.get("persona"))
-        descripcion = mov.get("description") or ""
+        descripcion = _safe_text(mov.get("description") or "")
 
         # Metadata de cuotas (solo se llena cuando hay >1 cuota).
         cuotas_actual = mov.get("cuotas_actual")
@@ -164,6 +192,11 @@ def upsert_movement(mov: dict) -> None:
         cuota_actual_cell = cuotas_actual if (cuotas_total and cuotas_total > 1) else ""
         cuotas_total_cell = cuotas_total if (cuotas_total and cuotas_total > 1) else ""
         cuota_pagar_cell = abs(cuota_monto) if (cuota_monto and cuotas_total and cuotas_total > 1) else ""
+
+        # Saldo: hoy solo BCh lo trae (cuenta corriente). Falabella es tarjeta
+        # de crédito → no aplica saldo (queda en None → celda vacía).
+        saldo = mov.get("saldo")
+        saldo_cell = saldo if saldo is not None else ""
 
         existing_row = _find_existing_row(sheet, fecha, descripcion, monto_abs)
 
@@ -193,7 +226,7 @@ def upsert_movement(mov: dict) -> None:
                 descripcion,                                   # 8.  Descripción
                 monto_abs,                                     # 9.  Monto
                 tipo,                                          # 10. Tipo (Abono/Cargo)
-                "",                                            # 11. Saldo (vacío, no disponible)
+                saldo_cell,                                    # 11. Saldo (BCh; vacío para Falabella)
                 cat,                                           # 12. Categoría
                 sub,                                           # 13. Subcategoría
                 cuota_actual_cell,                             # 14. Cuota actual

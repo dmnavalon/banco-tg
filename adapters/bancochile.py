@@ -402,27 +402,34 @@ def _read_current_page(page: Page) -> list[dict]:
             descripcion = row.locator("td.cdk-column-descripcion").first.inner_text().strip()
             cargo = row.locator("td.cdk-column-cargo").first.inner_text().strip()
             abono = row.locator("td.cdk-column-abono").first.inner_text().strip()
+            saldo = (
+                row.locator("td.cdk-column-saldo").first.inner_text().strip()
+                if row.locator("td.cdk-column-saldo").count()
+                else ""
+            )
         except Exception as e:
             log.warning(f"BCh fila {i}: error leyendo celdas: {e}")
             continue
-        mov = _parse_row(fecha, descripcion, cargo, abono)
+        mov = _parse_row(fecha, descripcion, cargo, abono, saldo)
         if mov:
             results.append(mov)
     return results
 
 
-def _parse_row(fecha: str, descripcion: str, cargo: str, abono: str) -> dict | None:
+def _parse_row(fecha: str, descripcion: str, cargo: str, abono: str, saldo: str = "") -> dict | None:
     """Parsea una fila de la cuenta corriente de BCh.
 
     BCh muestra cargo y abono en columnas separadas: una de las dos viene vacía.
     Si la celda de cargo trae monto → es un egreso (negativo). Si la de abono
-    trae monto → es un ingreso (positivo).
+    trae monto → es un ingreso (positivo). El saldo es el balance post-movimiento;
+    no afecta la categorización pero se persiste para que el dashboard lo use.
     """
     if not fecha or not descripcion:
         return None
 
     cargo_val = parse_clp_amount(cargo) if cargo.strip() else None
     abono_val = parse_clp_amount(abono) if abono.strip() else None
+    saldo_val = parse_clp_amount(saldo) if saldo.strip() else None
 
     if cargo_val is not None and cargo_val > 0:
         amount = -abs(cargo_val)
@@ -440,6 +447,7 @@ def _parse_row(fecha: str, descripcion: str, cargo: str, abono: str) -> dict | N
         "amount": amount,
         "movement_type": movement_type,
         "account": "bancochile",
+        "saldo": saldo_val,
     }
 
 
