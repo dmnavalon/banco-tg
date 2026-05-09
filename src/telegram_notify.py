@@ -420,16 +420,22 @@ def _movement_card_text(mov: dict) -> str:
 
     # Línea de cuotas: solo si la compra tiene >1 cuota. La "cuota a pagar"
     # es la mensualidad real que sale ese mes — distinta del Monto total.
+    # Si cuota_monto vino del modal de Falabella, se usa tal cual. Si no
+    # (mov inferido desde sufijo "(X/N)"), se deriva como amount/cuotas_total
+    # — exacta para cuotas sin interés, aproximada cuando hay interés.
     cuotas_actual = mov.get("cuotas_actual")
     cuotas_total = mov.get("cuotas_total")
     cuota_monto = mov.get("cuota_monto")
     cuotas_line = ""
     if cuotas_total and cuotas_total > 1:
         if cuota_monto:
-            cuota_str = _esc(format_clp(abs(cuota_monto)))
+            cuota_val = abs(cuota_monto)
+            cuota_str = _esc(format_clp(cuota_val))
             cuotas_line = f"\n💳 <b>Cuota:</b> {cuotas_actual} de {cuotas_total} · {cuota_str}/mes"
         else:
-            cuotas_line = f"\n💳 <b>Cuota:</b> {cuotas_actual} de {cuotas_total}"
+            cuota_val = abs(amount) / cuotas_total
+            cuota_str = _esc(format_clp(cuota_val))
+            cuotas_line = f"\n💳 <b>Cuota:</b> {cuotas_actual} de {cuotas_total} · ~{cuota_str}/mes"
 
     lines = [
         header,

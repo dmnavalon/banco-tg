@@ -713,9 +713,11 @@ def _backfill_cuotas_from_description(movs: list[dict]) -> None:
     persiste en Firestore. Modifica los dicts in-place.
 
     Solo aplica a pendientes (los aprobados/corregidos quedan como están,
-    según la decisión de Diego). cuota_monto NO se infiere — solo se obtiene
-    re-scrapeando, queda None hasta entonces. El dashboard puede derivar la
-    mensualidad como `monto / cuotas_total` si necesita aproximación.
+    según la decisión de Diego). cuota_monto NO se infiere ni se persiste —
+    solo se obtiene re-scrapeando el modal de Falabella, queda None hasta
+    entonces. La tarjeta TG y el dashboard del GSheet derivan on-the-fly
+    como `amount / cuotas_total` cuando cuota_monto es None (exacta para
+    cuotas sin interés, aproximada cuando hay interés).
     """
     for mov in movs:
         if mov.get("cuotas_total"):
