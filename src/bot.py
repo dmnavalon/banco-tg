@@ -11,6 +11,14 @@ from typing import Any
 import requests
 
 from . import db, feedback, gsheet, secrets_store, telegram_notify
+from .services import movements as movement_service
+from .services.exceptions import (
+    InvalidTransition,
+    MovementNotFound,
+    ServiceError,
+    ValidationError,
+    VersionConflict,
+)
 from .utils import format_clp, get_logger, project_path
 
 log = get_logger("bot")
@@ -375,14 +383,14 @@ def _handle_callback(callback: dict[str, Any]) -> None:
     mov = movs[0]
 
     if action == "a":
-        # Guard contra doble-approve: si ya estaba aprobado (ej. el usuario clickea
-        # ✅ en dos tarjetas duplicadas que el bot envió por error), no volver a
-        # llamar upsert_movement — eso evita el race condition con read-after-write
-        # del Google Sheets API que produce filas duplicadas en el sheet.
+        # Idempotencia: si el mov ya está aprobado/corregido_aprobado, refrescar
+        # la tarjeta sin tocar GSheet. La capa de servicios también es idempotente
+        # internamente, pero acá evitamos la llamada al servicio del todo.
+        review = mov.get("review_status") or ("approved" if mov.get("status") == "aprobado" else "pending")
         amount = float(mov.get("amount") or 0)
         default_cat = "Otros ingresos" if amount > 0 else "Otros"
-        if mov.get("status") == "aprobado":
-            log.info(f"approve duplicado ignorado para mov {mov_id} (ya estaba aprobado)")
+        if review in {"approved", "corrected_approved"}:
+            log.info(f"approve duplicado ignorado para mov {mov_id} (ya estaba {review})")
             cat = mov.get("final_category") or mov.get("suggested_category") or default_cat
             sub = mov.get("final_subcategory") or mov.get("suggested_subcategory")
             label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
@@ -393,26 +401,47 @@ def _handle_callback(callback: dict[str, Any]) -> None:
                            keyboard=_correct_again_keyboard(mov_id))
             return
 
-        cat = mov.get("suggested_category") or default_cat
-        sub = mov.get("suggested_subcategory")
-        # Primero GSheet — si falla, NO actualizamos Firestore para que el mov
-        # siga `pendiente` y Diego pueda reintentar. Antes el orden invertido
-        # dejaba el mov `aprobado` sin fila en GSheet (estado fantasma).
+        # Despacha al servicio según el review_status actual: si vino de una
+        # corrección (corrected_pending), pasa a corrected_approved; si está
+        # pending normal, pasa a approved. La capa de servicios maneja la
+        # transacción Firestore + dispara el sync a GSheet automáticamente.
         try:
-            gsheet.upsert_movement({**mov, "final_category": cat, "final_subcategory": sub})
-        except Exception as e:
-            log.warning(f"gsheet.upsert_movement falló: {e}")
+            if review == "corrected_pending":
+                updated = movement_service.approve_corrected_movement(
+                    mov_id, actor=chat_id, source="telegram", expected_version=None,
+                )
+            else:
+                updated = movement_service.approve_movement(
+                    mov_id, actor=chat_id, source="telegram", expected_version=None,
+                )
+        except InvalidTransition as e:
+            log.warning(f"approve {mov_id}: transición inválida {e}")
             if message_id:
                 from .telegram_notify import _movement_card_text
                 _edit_card(chat_id, message_id, mov,
-                           f"{_movement_card_text(mov)}\n\n⚠️ <b>GSheet falló:</b> {_hesc(str(e)[:120])}\nReintenta cuando puedas.")
+                           f"{_movement_card_text(mov)}\n\n⚠️ Estado actual no permite aprobar.")
             return
-        db.update_decision(mov_id, status="aprobado", final_category=cat, final_subcategory=sub, decided_by=chat_id)
+        except ServiceError as e:
+            log.exception(f"approve {mov_id} falló")
+            if message_id:
+                from .telegram_notify import _movement_card_text
+                _edit_card(chat_id, message_id, mov,
+                           f"{_movement_card_text(mov)}\n\n⚠️ <b>Error:</b> {_hesc(str(e)[:120])}")
+            return
+
+        cat = updated.get("final_category") or default_cat
+        sub = updated.get("final_subcategory")
         label = f"{_hesc(cat)} / {_hesc(sub)}" if sub else _hesc(cat)
+        sync = updated.get("sheet_sync_status")
+        if sync == "sync_error":
+            err = updated.get("sync_error_message") or "(sin detalle)"
+            tail = f"\n\n⚠️ <b>GSheet falló:</b> {_hesc(str(err)[:120])}\nReintentable desde el dashboard."
+        else:
+            tail = f"\n\n✅ <b>Aprobado:</b> {label}"
         if message_id:
             from .telegram_notify import _movement_card_text
-            _edit_card(chat_id, message_id, mov,
-                       f"{_movement_card_text(mov)}\n\n✅ <b>Aprobado:</b> {label}",
+            _edit_card(chat_id, message_id, updated,
+                       f"{_movement_card_text(updated)}{tail}",
                        keyboard=_correct_again_keyboard(mov_id))
 
     elif action == "i":
@@ -482,18 +511,31 @@ def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None
             _send(f"No pude reclasificar con tu hint: {type(e).__name__}: {e}")
             return
 
-        # Persistir la nueva sugerencia (queda como suggested_*, sigue 'pendiente').
-        db.update_classification(
-            mov_id,
-            suggested_category=cls.category,
-            suggested_subcategory=cls.subcategory,
-            confidence=cls.confidence,
-            classifier_source=cls.source,
-            comercio=cls.comercio or mov.get("comercio"),
-            tipo=cls.tipo or mov.get("tipo"),
-            requiere_revision=cls.requiere_revision,
-            pregunta_sugerida=cls.pregunta_sugerida,
-        )
+        # Pasa por la capa de servicios — actualiza suggested_* y final_*,
+        # cambia review_status a corrected_pending y registra audit. La
+        # aprobación posterior llamará a approve_corrected_movement.
+        try:
+            movement_service.correct_movement(
+                mov_id,
+                actor=chat_id,
+                source="telegram",
+                expected_version=None,
+                final_category=cls.category,
+                final_subcategory=cls.subcategory,
+                comercio_final=cls.comercio or mov.get("comercio_final") or mov.get("comercio"),
+                suggested_category=cls.category,
+                suggested_subcategory=cls.subcategory,
+                confidence=cls.confidence,
+                classifier_source=cls.source,
+                comercio=cls.comercio or mov.get("comercio"),
+                tipo=cls.tipo or mov.get("tipo"),
+                requiere_revision=cls.requiere_revision,
+                pregunta_sugerida=cls.pregunta_sugerida,
+            )
+        except ServiceError as e:
+            log.exception(f"correct {mov_id} (wizard) falló")
+            _send(f"No pude registrar la corrección: {type(e).__name__}: {e}")
+            return
 
         # Cerrar la tarjeta vieja con un nudge y reenviar una nueva con la categorización.
         if message_id:
@@ -585,17 +627,33 @@ def _handle_correction_reply(text: str, chat_id: str, pending: dict, prompt_msg_
         _send(f"No pude reclasificar: {type(e).__name__}: {e}")
         return
 
-    db.update_classification(
-        mov_id,
-        suggested_category=cls.category,
-        suggested_subcategory=cls.subcategory,
-        confidence=cls.confidence,
-        classifier_source=cls.source,
-        comercio=cls.comercio or mov.get("comercio"),
-        tipo=cls.tipo or mov.get("tipo"),
-        requiere_revision=cls.requiere_revision,
-        pregunta_sugerida=cls.pregunta_sugerida,
-    )
+    # services.movements.correct_movement persiste sugerencias re-clasificadas
+    # y simultáneamente setea final_* al mismo valor (la corrección del usuario
+    # equivale a su decisión). Pasa el mov a corrected_pending — el bot lo
+    # reenvía como tarjeta normal y al apretar ✅ pasa a corrected_approved
+    # via approve_corrected_movement (despachado en _handle_callback action 'a').
+    try:
+        movement_service.correct_movement(
+            mov_id,
+            actor=chat_id,
+            source="telegram",
+            expected_version=None,
+            final_category=cls.category,
+            final_subcategory=cls.subcategory,
+            comercio_final=cls.comercio or mov.get("comercio_final") or mov.get("comercio"),
+            suggested_category=cls.category,
+            suggested_subcategory=cls.subcategory,
+            confidence=cls.confidence,
+            classifier_source=cls.source,
+            comercio=cls.comercio or mov.get("comercio"),
+            tipo=cls.tipo or mov.get("tipo"),
+            requiere_revision=cls.requiere_revision,
+            pregunta_sugerida=cls.pregunta_sugerida,
+        )
+    except ServiceError as e:
+        log.exception(f"correct {mov_id} falló")
+        _send(f"No pude registrar la corrección: {type(e).__name__}: {e}")
+        return
 
     refreshed = db.get_movements_by_ids([mov_id])
     if refreshed:
@@ -634,18 +692,27 @@ def _handle_ignore_reply(text: str, chat_id: str, pending: dict, prompt_msg_id: 
         _send("✖️ Ignore cancelado.")
         return
 
-    reason: str | None = text_clean
+    # services.movements.ignore_movement requiere reason no vacío. Cuando Diego
+    # responde "skip", usamos el placeholder "(sin razón)" para mantener el flow
+    # — la columna `ignore_reason` igual queda con un valor explícito que el
+    # dashboard puede mostrar como "Sin razón especificada".
     if text_lower in {"skip", "sin razon", "sin razón", "-", "ninguna", "nada"}:
-        reason = None
+        reason = "(sin razón)"
+    else:
+        reason = text_clean
 
-    db.update_decision(
-        mov_id,
-        status="ignorado",
-        final_category=None,
-        final_subcategory=None,
-        decided_by=chat_id,
-        ignore_reason=reason,
-    )
+    try:
+        movement_service.ignore_movement(
+            mov_id,
+            actor=chat_id,
+            source="telegram",
+            reason=reason,
+            expected_version=None,
+        )
+    except ServiceError as e:
+        log.exception(f"ignore {mov_id} falló")
+        _send(f"No pude ignorar: {type(e).__name__}: {e}")
+        return
 
     # Editar la tarjeta original para mostrarla como Ignorado (con razón si la hay)
     # + botón "Corregir nuevamente" por si Diego cambia de opinión después.
@@ -655,7 +722,10 @@ def _handle_ignore_reply(text: str, chat_id: str, pending: dict, prompt_msg_id: 
         orig_msg_id = pending.get("original_card_message_id")
         if orig_msg_id:
             from .telegram_notify import _movement_card_text
-            badge = f"\n\n⚫ <b>Ignorado:</b> {_hesc(reason)}" if reason else "\n\n⚫ <b>Ignorado</b>"
+            # "(sin razón)" es el placeholder que usamos cuando Diego escribió
+            # "skip"/"-"; en la tarjeta lo escondemos para conservar la UX previa.
+            show_reason = reason if reason and reason != "(sin razón)" else None
+            badge = f"\n\n⚫ <b>Ignorado:</b> {_hesc(show_reason)}" if show_reason else "\n\n⚫ <b>Ignorado</b>"
             _edit_card(chat_id, int(orig_msg_id), mov_new,
                        f"{_movement_card_text(mov_new)}{badge}",
                        keyboard=_correct_again_keyboard(mov_id))
@@ -889,8 +959,30 @@ def _resend_pending() -> None:
         _send(f"Error reenviando pendientes: {type(e).__name__}: {e}")
 
 
+def _start_api_thread() -> None:
+    """Levanta el servidor HTTP de la feature Movimientos en un thread daemon.
+    Si ENABLE_MOVIMIENTOS_REVIEW≠true, no hace nada (la app retorna None).
+    El thread es daemon: cuando el proceso del bot termina, el thread también."""
+    if (os.environ.get("ENABLE_MOVIMIENTOS_REVIEW") or "").lower() != "true":
+        log.info("ENABLE_MOVIMIENTOS_REVIEW=false — API HTTP no iniciada.")
+        return
+
+    def _runner():
+        try:
+            from .api import server as api_server
+            api_server.run_app()
+        except Exception as e:
+            log.exception(f"API HTTP crashed: {type(e).__name__}: {e}")
+            db.record_error("api.thread", str(e), traceback.format_exc())
+
+    t = threading.Thread(target=_runner, name="api-http", daemon=True)
+    t.start()
+    log.info("API HTTP thread iniciado.")
+
+
 def main() -> None:
     db.init_if_needed()
+    _start_api_thread()
     log.info("Bot iniciando long-poll…")
     offset = _read_offset()
     while True:

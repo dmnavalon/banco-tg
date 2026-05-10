@@ -245,10 +245,28 @@ DRY_RUN=false
 HEADLESS=false      # ponlo true cuando confirmes que el flujo va sin intervención
 LOG_LEVEL=INFO
 GSHEET_KEY_PATH=data/gsheet_service_account.json
+
+# Feature "Movimientos" (revisión masiva en dashboard) — desactivada por default.
+ENABLE_MOVIMIENTOS_REVIEW=false
+DASHBOARD_API_TOKEN=         # token compartido con el dashboard (Vercel)
+DASHBOARD_ORIGIN=            # opcional: origen Vercel para CORS
+PORT=8080                    # puerto HTTP de la API; Railway lo inyecta auto
 ```
 
 NO agregues `BANK_*_RUT/PASS`. Las credenciales bancarias viven cifradas
 en Firestore `credentials/<banco>`.
+
+## Feature "Movimientos" (revisión masiva)
+
+Cuando `ENABLE_MOVIMIENTOS_REVIEW=true`, el proceso del bot Railway levanta
+una API HTTP en el mismo proceso (puerto $PORT) para que el dashboard
+Next.js pueda listar y mutar movimientos en lote (aprobar/corregir/ignorar/
+reabrir, individual o masivo).
+
+Detalles técnicos completos en `HANDOFF.md` sección 17. Activación
+operativa: ver `HANDOFF.md` sección 17 — "Activación inicial".
+
+Tests: `.venv/bin/python -m pytest tests/`.
 
 ## Troubleshooting
 

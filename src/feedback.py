@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import re
 
-from . import classifier, db, gsheet, telegram_notify
+from . import classifier, db, telegram_notify
+from .services import movements as movement_service
+from .services.exceptions import ServiceError
 from .utils import get_logger, normalize
 
 log = get_logger("feedback")
@@ -19,6 +21,8 @@ def apply(text: str, chat_id: str) -> str:
     """Procesa un mensaje libre del usuario contra el último batch.
 
     Devuelve un mensaje en español describiendo el resultado para enviar a TG.
+    Toda la decisión pasa por la capa de servicios (services.movements) que
+    maneja status dual, version, audit y sync GSheet.
     """
     text = (text or "").strip()
     if not text:
@@ -57,28 +61,47 @@ def apply(text: str, chat_id: str) -> str:
         return f"No encontré el movimiento #{idx} en la base."
 
     mov = movs[0]
+    review = mov.get("review_status") or ("approved" if mov.get("status") == "aprobado" else "pending")
+
+    # Solo se permite decidir movimientos pendientes/corrected_pending. Si fue
+    # aprobado/ignorado antes (ej. el usuario revisita un ignorado vía /pending),
+    # informar y no hacer nada.
+    if rest_lower in {"ok", "ok.", "si", "sí", "ignorar", "ignora", "skip"}:
+        if review not in {"pending", "corrected_pending"}:
+            return f"#{idx} ya está {review}, no lo modifico."
 
     if rest_lower in {"ok", "ok.", "si", "sí"}:
-        cat = mov["suggested_category"] or "Otro"
-        sub = mov["suggested_subcategory"]
-        db.update_decision(
-            mov_id,
-            status="aprobado",
-            final_category=cat,
-            final_subcategory=sub,
-            decided_by=chat_id,
-        )
-        gsheet_warn = _try_append({**mov, "final_category": cat, "final_subcategory": sub})
-        return f"OK #{idx}: {cat}{('/' + sub) if sub else ''} ✓{gsheet_warn}"
+        try:
+            if review == "corrected_pending":
+                updated = movement_service.approve_corrected_movement(
+                    mov_id, actor=chat_id, source="telegram", expected_version=None,
+                )
+            else:
+                updated = movement_service.approve_movement(
+                    mov_id, actor=chat_id, source="telegram", expected_version=None,
+                )
+        except ServiceError as e:
+            log.exception(f"feedback approve {mov_id} falló")
+            return f"⚠️ No pude aprobar #{idx}: {type(e).__name__}: {str(e)[:120]}"
+
+        cat = updated.get("final_category") or "?"
+        sub = updated.get("final_subcategory")
+        sync = updated.get("sheet_sync_status")
+        suffix = "" if sync == "synced" else f" (sync: {sync})"
+        return f"OK #{idx}: {cat}{('/' + sub) if sub else ''} ✓{suffix}"
 
     if rest_lower in {"ignorar", "ignora", "skip"}:
-        db.update_decision(
-            mov_id,
-            status="ignorado",
-            final_category=None,
-            final_subcategory=None,
-            decided_by=chat_id,
-        )
+        try:
+            movement_service.ignore_movement(
+                mov_id,
+                actor=chat_id,
+                source="telegram",
+                reason="(sin razón)",
+                expected_version=None,
+            )
+        except ServiceError as e:
+            log.exception(f"feedback ignore {mov_id} falló")
+            return f"⚠️ No pude ignorar #{idx}: {type(e).__name__}: {str(e)[:120]}"
         return f"Ignorado #{idx} ✓"
 
     # Texto libre como hint: re-clasificar con el LLM y reenviar tarjeta para confirmar.
@@ -92,17 +115,27 @@ def apply(text: str, chat_id: str) -> str:
         log.exception("classify_with_hint falló")
         return f"No pude reclasificar #{idx}: {type(e).__name__}: {e}"
 
-    db.update_classification(
-        mov_id,
-        suggested_category=cls.category,
-        suggested_subcategory=cls.subcategory,
-        confidence=cls.confidence,
-        classifier_source=cls.source,
-        comercio=cls.comercio or mov.get("comercio"),
-        tipo=cls.tipo or mov.get("tipo"),
-        requiere_revision=cls.requiere_revision,
-        pregunta_sugerida=cls.pregunta_sugerida,
-    )
+    try:
+        movement_service.correct_movement(
+            mov_id,
+            actor=chat_id,
+            source="telegram",
+            expected_version=None,
+            final_category=cls.category,
+            final_subcategory=cls.subcategory,
+            comercio_final=cls.comercio or mov.get("comercio_final") or mov.get("comercio"),
+            suggested_category=cls.category,
+            suggested_subcategory=cls.subcategory,
+            confidence=cls.confidence,
+            classifier_source=cls.source,
+            comercio=cls.comercio or mov.get("comercio"),
+            tipo=cls.tipo or mov.get("tipo"),
+            requiere_revision=cls.requiere_revision,
+            pregunta_sugerida=cls.pregunta_sugerida,
+        )
+    except ServiceError as e:
+        log.exception(f"feedback correct {mov_id} falló")
+        return f"No pude registrar la corrección de #{idx}: {type(e).__name__}: {e}"
 
     refreshed = db.get_movements_by_ids([mov_id])
     if refreshed:
@@ -111,47 +144,47 @@ def apply(text: str, chat_id: str) -> str:
 
 
 def _approve_all(ids: list[str], chat_id: str) -> str:
+    """Aprueba todos los movimientos pendientes del último batch. Cada uno pasa
+    por services.movements.approve_movement (o approve_corrected_movement si
+    ya estaba en corrected_pending). El service dispara el sync a GSheet por
+    cada uno; los que fallan quedan en sheet_sync_status=sync_error y son
+    reintentables desde el dashboard."""
     movs = db.get_movements_by_ids(ids)
     count = 0
     sheet_failures = 0
+    skipped = 0
+
     for mov in movs:
-        if mov["status"] != "pendiente":
+        review = mov.get("review_status") or ("approved" if mov.get("status") == "aprobado" else "pending")
+        if review not in {"pending", "corrected_pending"}:
+            skipped += 1
             continue
-        cat = mov["suggested_category"] or "Otro"
-        sub = mov["suggested_subcategory"]
-        db.update_decision(
-            mov["id"],
-            status="aprobado",
-            final_category=cat,
-            final_subcategory=sub,
-            decided_by=chat_id,
-        )
-        if _try_append({**mov, "final_category": cat, "final_subcategory": sub}):
+
+        try:
+            if review == "corrected_pending":
+                updated = movement_service.approve_corrected_movement(
+                    mov["id"], actor=chat_id, source="telegram", expected_version=None,
+                )
+            else:
+                updated = movement_service.approve_movement(
+                    mov["id"], actor=chat_id, source="telegram", expected_version=None,
+                )
+        except ServiceError as e:
+            log.exception(f"_approve_all error en {mov.get('id')}")
             sheet_failures += 1
-        count += 1
+            continue
+
+        if updated.get("sheet_sync_status") == "sync_error":
+            sheet_failures += 1
+        else:
+            count += 1
+
     msg = f"Aprobados {count} movimientos del último batch ✓"
     if sheet_failures:
-        msg += f"\n⚠️ {sheet_failures} no llegaron al GSheet (ver logs)."
+        msg += f"\n⚠️ {sheet_failures} con error de sync a GSheet (reintenta desde el dashboard)."
+    if skipped:
+        msg += f"\n({skipped} ya estaban resueltos, no se tocaron)"
     return msg
-
-
-def _try_append(mov: dict) -> str:
-    """Empuja el movimiento al GSheet. Si falla, loguea con stack y devuelve un warning para el mensaje al usuario."""
-    try:
-        gsheet.upsert_movement(mov)
-        return ""
-    except Exception as e:
-        log.exception("No pude empujar al GSheet")
-        return f"\n⚠️ GSheet falló: {type(e).__name__}: {str(e)[:120]}"
-
-
-def _split_cat_sub(s: str) -> tuple[str, str | None]:
-    parts = [p.strip() for p in s.split("/", 1)]
-    cat = parts[0].capitalize() if parts[0] else "Otro"
-    sub = parts[1] if len(parts) > 1 and parts[1] else None
-    if sub:
-        sub = sub.capitalize()
-    return cat, sub
 
 
 _PATTERN_STOPWORDS = {

@@ -37,8 +37,8 @@ SHEET_NAME = "Movimientos"
 
 _DAYS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-# Header oficial del sheet — 24 columnas. Si lo cambias, sincroniza la fila 1
-# del sheet (ver scripts/extend_sheet_header.py).
+# Header oficial del sheet — 25 columnas. Si lo cambias, sincroniza la fila 1
+# del sheet (ver scripts/extend_sheet_movement_id.py).
 #
 # Layout:
 #   1-13:  Datos del movimiento (gestión del bot)
@@ -46,6 +46,10 @@ _DAYS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Do
 #   17-24: Columnas del dashboard del usuario (Diego). El bot las preserva en
 #          append (las deja vacías) y NUNCA las toca en update — las llena
 #          el dashboard via fórmulas o input manual.
+#   25:    MovementId — identificador estable del documento Firestore. Se
+#          escribe en append y al sincronizar movs aprobados desde la feature
+#          "Movimientos". Permite lookup idempotente sin depender del triple
+#          (fecha, desc, monto) y evita filas duplicadas en reintentos de sync.
 SHEET_HEADER = [
     # Bot:
     "Fecha", "Día", "Mes", "Año", "Día Semana",
@@ -56,6 +60,8 @@ SHEET_HEADER = [
     # Dashboard de Diego — el bot solo append-vacío:
     "Moneda", "MontoCLP", "Esencial", "Fijo",
     "Recurrente", "Extraordinario", "Excluido", "Notas",
+    # Feature Movimientos:
+    "MovementId",
 ]
 
 # Última columna que el bot escribe en update. Todo lo de la col 17 en adelante
@@ -85,19 +91,54 @@ _COL_SUBCATEGORIA = SHEET_HEADER.index("Subcategoría") + 1  # 13
 _COL_FECHA = SHEET_HEADER.index("Fecha") + 1             # 1
 _COL_DESCRIPCION = SHEET_HEADER.index("Descripción") + 1  # 8
 _COL_MONTO = SHEET_HEADER.index("Monto") + 1             # 9
+_COL_MOVEMENT_ID = SHEET_HEADER.index("MovementId") + 1  # 25 (Y)
 
 
-def _find_existing_row(sheet, fecha_dmy: str, descripcion: str, monto_abs: float) -> int | None:
-    """Busca el row 1-indexed cuya fila coincida con (fecha DD/MM/YYYY, descripción, monto).
-    Devuelve None si no encuentra. Skipea fila 1 (header).
+def _col_letter(col_1_indexed: int) -> str:
+    """Convierte 1→A, 2→B, ..., 25→Y, 26→Z, 27→AA. Hasta col 702 (ZZ)."""
+    s = ""
+    n = col_1_indexed
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+    return s
 
-    Normaliza la descripción (case + espacios + NBSP) para tolerar diferencias
-    accidentales entre el bot y filas escritas por otros procesos."""
+
+_LETTER_MOVEMENT_ID = _col_letter(_COL_MOVEMENT_ID)  # "Y"
+
+
+def _find_existing_row(
+    sheet,
+    fecha_dmy: str,
+    descripcion: str,
+    monto_abs: float,
+    movement_id: str | None = None,
+) -> int | None:
+    """Busca el row 1-indexed que corresponde a un movimiento.
+
+    Estrategia:
+    1. Si se pasa `movement_id`, primero busca por la col MovementId (Y) —
+       match exacto, idempotente, no falla por descripciones reformateadas.
+    2. Fallback al triple (fecha DD/MM/YYYY, descripción, monto) — único en
+       la práctica para movs legacy sin movement_id.
+
+    Devuelve None si no encuentra. Skipea fila 1 (header)."""
     try:
         all_rows = sheet.get_all_values()
     except Exception as e:
         log.warning(f"GSheet get_all_values falló: {e}")
         return None
+
+    # Lookup por movement_id primero (cuando viene): O(N) pero exacto.
+    if movement_id:
+        for i, row in enumerate(all_rows[1:], start=2):
+            if len(row) >= _COL_MOVEMENT_ID:
+                cell = (row[_COL_MOVEMENT_ID - 1] or "").strip()
+                if cell.startswith("'"):
+                    cell = cell[1:]
+                if cell == movement_id:
+                    return i
+
     target_fecha = (fecha_dmy or "").strip()
     target_desc_norm = _norm_desc(descripcion or "")
     # Si la descripción venía con prefijo `'` (anti-fórmula), el sheet lo guarda
@@ -198,7 +239,8 @@ def upsert_movement(mov: dict) -> None:
         saldo = mov.get("saldo")
         saldo_cell = saldo if saldo is not None else ""
 
-        existing_row = _find_existing_row(sheet, fecha, descripcion, monto_abs)
+        mov_id = (mov.get("id") or "").strip() or None
+        existing_row = _find_existing_row(sheet, fecha, descripcion, monto_abs, movement_id=mov_id)
 
         if existing_row:
             # Update SOLO de las cols del bot: Categoría (L), Subcategoría (M),
@@ -210,6 +252,18 @@ def upsert_movement(mov: dict) -> None:
                 [[cat, sub, cuota_actual_cell, cuotas_total_cell, cuota_pagar_cell]],
                 value_input_option="USER_ENTERED",
             )
+            # Completar col Y (MovementId) si está vacía. Esto backfillea el id
+            # automáticamente la primera vez que un movimiento legacy se actualiza
+            # — no necesita un script de backfill adicional para esos casos.
+            if mov_id:
+                try:
+                    cell_range = f"{_LETTER_MOVEMENT_ID}{existing_row}"
+                    current = sheet.acell(cell_range).value or ""
+                    if not current.strip():
+                        sheet.update(cell_range, [[mov_id]], value_input_option="RAW")
+                except Exception as e:
+                    # No bloqueamos el upsert si el backfill del id falla.
+                    log.warning(f"No pude backfillar MovementId en row {existing_row}: {e}")
             log.info(f"GSheet UPDATE row {existing_row}: {fecha} · {descripcion[:40]} → {cat}/{sub}")
         else:
             # Append: las cols 17-24 (dashboard del usuario) van vacías. Si tu
@@ -234,9 +288,10 @@ def upsert_movement(mov: dict) -> None:
                 cuota_pagar_cell,                              # 16. Cuota a pagar
                 # 17-24 (dashboard del usuario): el bot deja vacío.
                 "", "", "", "", "", "", "", "",
+                mov_id or "",                                  # 25. MovementId
             ]
             sheet.append_row(row, value_input_option="USER_ENTERED")
-            log.info(f"GSheet APPEND: {fecha} · {descripcion[:40]} → {cat}/{sub}")
+            log.info(f"GSheet APPEND: {fecha} · {descripcion[:40]} → {cat}/{sub} [id={mov_id}]")
     except Exception:
         log.exception("GSheet falló al hacer upsert")
         raise

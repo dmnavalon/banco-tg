@@ -10,7 +10,10 @@ import { PlaceholderSection } from "./sections/Placeholder";
 import { DetalleKpiPanel } from "./ui/DetalleKpiPanel";
 import { ThemeToggle } from "./ui/ThemeToggle";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, TrendingUp, DollarSign, Target, CreditCard, Wallet, PieChart, Building, ShieldCheck, Bell, Sparkles } from "lucide-react";
+import { LayoutDashboard, TrendingUp, DollarSign, Target, CreditCard, Wallet, PieChart, Building, ShieldCheck, Bell, Sparkles, ListChecks } from "lucide-react";
+import Link from "next/link";
+
+const MOVIMIENTOS_ENABLED = process.env.NEXT_PUBLIC_ENABLE_MOVIMIENTOS_REVIEW === "true";
 
 const SECTIONS = [
   { id: "resumen", label: "Resumen", Icon: LayoutDashboard },
@@ -54,6 +57,15 @@ export function Dashboard({ kpis, data, spreadsheetId }: { kpis: DashboardKPIs; 
                 <p>{kpis.alertas.length} alertas activas</p>
                 <p>{kpis.alertas.filter((a) => a.severidad === "alta").length} de severidad alta</p>
               </div>
+              {MOVIMIENTOS_ENABLED && (
+                <Link
+                  href="/movimientos"
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                >
+                  <ListChecks className="h-3.5 w-3.5" />
+                  Movimientos
+                </Link>
+              )}
               <ThemeToggle />
             </div>
           </div>

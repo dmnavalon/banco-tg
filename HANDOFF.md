@@ -427,3 +427,78 @@ Si el agente nuevo es Claude Code, ya las va a leer automáticamente al entrar a
 ---
 
 **Última auditoría hecha**: 2026-05-08, durante esta sesión. Todo lo de arriba está vigente al cierre. Si el agente nuevo encuentra divergencias, **el código manda** — actualizar este HANDOFF cuando se hagan cambios sustanciales.
+
+---
+
+## 17. Feature "Movimientos" (revisión masiva en dashboard)
+
+Sección agregada 2026-05-09. Permite revisar/aprobar/corregir/ignorar movimientos en lote desde el dashboard, manteniendo Firestore como fuente única de verdad y Telegram funcionando igual.
+
+### Capa central
+- `src/services/movements.py` — funciones `approve_movement`, `correct_movement`, `approve_corrected_movement`, `ignore_movement`, `reopen_movement`, `sync_approved_movement_to_sheet`, `bulk_*`. Usa transacciones Firestore + version check. Cada acción dispara `services.audit.record_event` a la collection `movement_audit`.
+- `src/services/exceptions.py` — `MovementNotFound`, `InvalidTransition`, `VersionConflict`, `ValidationError`.
+- Bot Telegram (`src/bot.py`) y `src/feedback.py` ahora delegan a esta capa. NUNCA llaman directo a `db.update_decision` ni `gsheet.upsert_movement` para approve/correct/ignore.
+
+### Modelo de estados (dual con legacy)
+- `review_status`: `pending | approved | corrected_pending | corrected_approved | ignored | error`
+- `sheet_sync_status`: `not_ready | pending_sync | synced | sync_error`
+- `version`: int, optimistic locking. El bot pasa `expected_version=None` (skip check). Dashboard SIEMPRE pasa el version del payload — 409 si conflict.
+- `status` legacy se sigue escribiendo (mapeo: `pending|corrected_pending`→`pendiente`, `approved|corrected_approved`→`aprobado`, `ignored`→`ignorado`) hasta que la feature esté validada en producción.
+
+### API HTTP
+- Corre en el MISMO proceso del bot Railway, en thread daemon separado. Activada por env var `ENABLE_MOVIMIENTOS_REVIEW=true`. Si está en false, el thread no levanta.
+- Auth: header `Authorization: Bearer ${DASHBOARD_API_TOKEN}`.
+- Endpoints (todos prefijados `/api`): `health`, `categories`, `movements` (GET list + filtros), `movements/<id>` (GET detail), `movements/<id>/audit`, `movements/<id>/{approve,correct,approve-correction,ignore,reopen,sync}`, `movements/bulk/{approve,categorize,ignore,comment,reopen}`.
+- Smoke: `curl https://<railway>.up.railway.app/api/health` → 200.
+- Implementado con Flask + werkzeug (`src/api/server.py`, `src/api/routes/`). Sin nuevos servicios Railway → no rompe el "no múltiples polling".
+
+### Dashboard (Next.js)
+- Sección en `dashboard/app/movimientos/page.tsx` (componente `MovimientosTable`). Pestañas, filtros, edición inline, acciones masivas, modal de ignore, drawer de audit. Auto-refresh 30s.
+- Route handlers proxy en `dashboard/app/api/movimientos/`. NUNCA exponen `BACKEND_API_TOKEN` al navegador — el token solo se usa server-side.
+- Reusa el Basic Auth existente de `dashboard/proxy.ts` (`DASHBOARD_PASSWORD`) para gating del frontend.
+- Activación: env vars en Vercel `NEXT_PUBLIC_ENABLE_MOVIMIENTOS_REVIEW=true`, `BACKEND_API_URL=https://<railway>.up.railway.app`, `BACKEND_API_TOKEN=<mismo token que en Railway>`.
+
+### Google Sheet
+- Header extendido a 25 cols. Col 25 (Y) = `MovementId`. Lookup en `gsheet._find_existing_row` ahora prefiere `movement_id` si está; fallback al triple (fecha, desc, monto) para movs legacy. Idempotente — reintentar sync no duplica filas.
+- Una fila approved en GSheet tiene `MovementId` automáticamente desde el primer upsert post-feature. Movs legacy se backfillean con `scripts/extend_sheet_movement_id.py`.
+
+### Scripts
+- `scripts/extend_sheet_movement_id.py [--dry-run]` — agrega col Y al header y backfilla `movement_id` por match (fecha, desc, monto). Idempotente.
+- `scripts/backfill_movement_status.py [--dry-run]` — mapea `status` legacy → `review_status`/`sheet_sync_status`/`version`/`updated_at`. Para `aprobado`, marca `synced` si encontró fila en GSheet, `sync_error` si no. NO toca `status` legacy.
+
+### Auditoría
+- Collection `movement_audit` — un doc por evento. Campos: `movement_id, action, prev_review_status, new_review_status, prev_sheet_sync_status, new_sheet_sync_status, actor, source (telegram|dashboard|system), details, created_at`.
+- Endpoint `GET /api/movements/<id>/audit` y drawer en el dashboard.
+- TTL 90 días recomendado (configurar en Cloud Console o agregar script).
+
+### Feature flag y rollback
+- Backend: `ENABLE_MOVIMIENTOS_REVIEW=false` en Railway → API thread no levanta. Bot sigue funcionando con dual-write a `status` legacy.
+- Frontend: `NEXT_PUBLIC_ENABLE_MOVIMIENTOS_REVIEW=false` en Vercel → link "Movimientos" se oculta y los route handlers responden 404.
+- Tests: `cd "Gestión de Gastos" && .venv/bin/python -m pytest tests/` — 33 pasando al cierre.
+
+### Activación inicial (lo que Diego tiene que hacer una vez)
+
+```bash
+# 1. Generar token compartido (un valor aleatorio largo).
+openssl rand -hex 32
+
+# 2. En Railway (variables del servicio bot):
+#    ENABLE_MOVIMIENTOS_REVIEW=true
+#    DASHBOARD_API_TOKEN=<token>
+#    DASHBOARD_ORIGIN=https://<dashboard-url>.vercel.app   (opcional, para CORS)
+
+# 3. En Vercel (settings → environment variables):
+#    NEXT_PUBLIC_ENABLE_MOVIMIENTOS_REVIEW=true
+#    BACKEND_API_URL=https://<railway-service>.up.railway.app
+#    BACKEND_API_TOKEN=<mismo token>
+
+# 4. Backfill desde la Mac de Diego (una sola vez):
+cd "/Users/diego/Desktop/Desarrollos DMN/Control de Gastos/Gestión de Gastos" && .venv/bin/python -m scripts.extend_sheet_movement_id --dry-run
+# Verificar el output, luego correr sin --dry-run:
+cd "/Users/diego/Desktop/Desarrollos DMN/Control de Gastos/Gestión de Gastos" && .venv/bin/python -m scripts.extend_sheet_movement_id
+cd "/Users/diego/Desktop/Desarrollos DMN/Control de Gastos/Gestión de Gastos" && .venv/bin/python -m scripts.backfill_movement_status --dry-run
+cd "/Users/diego/Desktop/Desarrollos DMN/Control de Gastos/Gestión de Gastos" && .venv/bin/python -m scripts.backfill_movement_status
+
+# 5. Redeploy: Railway hace auto-redeploy en push; en Vercel se
+#    gatilla un build automático tras cambiar env vars.
+```

@@ -25,4 +25,9 @@ COPY . .
 ENV HEADLESS=true
 ENV LOG_LEVEL=INFO
 
+# Puerto HTTP para la API de la feature "Movimientos". Solo aplica si
+# ENABLE_MOVIMIENTOS_REVIEW=true. Railway provee $PORT en runtime; si no
+# está, el bot usa 8080 por default.
+EXPOSE 8080
+
 CMD ["python", "-m", "src.bot"]

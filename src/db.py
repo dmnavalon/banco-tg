@@ -143,6 +143,22 @@ def insert_movement(
         "notified_at": None,
         "tg_photo_file_id": None,
         "inserted_at": _now(),
+        # Campos del modelo dual de la feature "Movimientos" (revisión masiva en
+        # dashboard). El bot legacy sigue usando `status`; los servicios nuevos
+        # leen/escriben review_status + sheet_sync_status + version. Mantener
+        # ambos sincronizados durante la transición evita migración destructiva.
+        "review_status": "pending",
+        "sheet_sync_status": "not_ready",
+        "version": 1,
+        "updated_at": _now(),
+        "comercio_final": None,
+        "comment": None,
+        "ignore_reason": None,
+        "last_action_source": "system",
+        "corrected_at": None,
+        "corrected_by": None,
+        "sheet_row_id": None,
+        "sync_error_message": None,
     }
     # `create()` es atómico — falla con AlreadyExists si el doc ya existe.
     # Reemplaza el patrón read-then-write que tenía race condition entre
@@ -306,6 +322,125 @@ def count_total() -> int:
         return int(agg[0][0].value)
     except Exception:
         return len(list(_db().collection("movements").get()))
+
+
+# ── movements (helpers para servicios "Movimientos") ──────────────────────
+# Estas funciones soportan la capa central src/services/movements.py. Conviven
+# con las legacy (insert_movement, update_decision, get_pending, etc.) sin
+# romperlas. Las nuevas versiones manejan version + transacciones.
+
+
+def get_movement_by_id(mov_id: str) -> dict | None:
+    snap = _db().collection("movements").document(mov_id).get()
+    return snap.to_dict() if snap.exists else None
+
+
+def get_movement_ref(mov_id: str):
+    """Devuelve un DocumentReference para usar dentro de una transacción.
+    Pensado para servicios — no usar directamente fuera de transactional."""
+    return _db().collection("movements").document(mov_id)
+
+
+def run_txn(callback):
+    """Ejecuta `callback(transaction)` dentro de una transacción Firestore.
+    Centralizar el decorator `@firestore.transactional` acá hace que los
+    tests puedan monkey-patchear esta sola función para correr la lógica
+    sin transacción real (mockfirestore no provee transactional)."""
+    transaction = _db().transaction()
+
+    @fstore.transactional
+    def _wrapped(t):
+        return callback(t)
+
+    return _wrapped(transaction)
+
+
+# Filtros válidos para query_movements. Los servidores los validan antes de
+# llamar — cualquier filtro fuera de esta lista se ignora silenciosamente.
+_QUERY_REVIEW_STATUSES = {
+    "pending", "approved", "corrected_pending", "corrected_approved",
+    "ignored", "error",
+}
+
+
+def query_movements(
+    *,
+    review_status: str | list[str] | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    bank: str | None = None,
+    persona: str | None = None,
+    final_category: str | None = None,
+    final_subcategory: str | None = None,
+    min_amount: float | None = None,
+    max_amount: float | None = None,
+    confidence_min: float | None = None,
+    description_contains: str | None = None,
+    comercio_contains: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Query genérico de movimientos para el dashboard. Filtros server-side los
+    que Firestore puede hacer barato (where), el resto en Python tras traer.
+
+    Para mantener el costo bajo: aplicar primero el filtro más selectivo
+    (review_status si está) y limitar resultados a 500 antes de filtros locales.
+    Las queries que combinan múltiples campos pueden requerir índices
+    compuestos — se documentan en HANDOFF.md."""
+    limit = max(1, min(int(limit or 100), 500))
+    q = _db().collection("movements")
+
+    # Normalizar review_status a lista para usar `in` en Firestore (max 30 vals).
+    statuses: list[str] | None = None
+    if isinstance(review_status, str):
+        if review_status in _QUERY_REVIEW_STATUSES:
+            statuses = [review_status]
+    elif isinstance(review_status, list):
+        statuses = [s for s in review_status if s in _QUERY_REVIEW_STATUSES]
+        if not statuses:
+            statuses = None
+
+    if statuses and len(statuses) == 1:
+        q = q.where("review_status", "==", statuses[0])
+    elif statuses:
+        q = q.where("review_status", "in", statuses)
+
+    # Bank igualdad — barato.
+    if bank:
+        q = q.where("bank", "==", bank)
+
+    # Range queries (date) — Firestore acepta una sola desigualdad por field,
+    # así que `from`+`to` ambas en `date` están OK.
+    if date_from:
+        q = q.where("date", ">=", date_from)
+    if date_to:
+        q = q.where("date", "<=", date_to)
+
+    # Limit fetch para no traer toda la collection.
+    docs = q.limit(limit).get()
+    rows = [d.to_dict() for d in docs]
+
+    # Filtros que se hacen en Python (no requieren índices).
+    if persona:
+        rows = [r for r in rows if (r.get("persona") or "") == persona]
+    if final_category:
+        rows = [r for r in rows if (r.get("final_category") or r.get("suggested_category") or "") == final_category]
+    if final_subcategory:
+        rows = [r for r in rows if (r.get("final_subcategory") or r.get("suggested_subcategory") or "") == final_subcategory]
+    if min_amount is not None:
+        rows = [r for r in rows if abs(float(r.get("amount") or 0)) >= float(min_amount)]
+    if max_amount is not None:
+        rows = [r for r in rows if abs(float(r.get("amount") or 0)) <= float(max_amount)]
+    if confidence_min is not None:
+        rows = [r for r in rows if float(r.get("confidence") or 0) >= float(confidence_min)]
+    if description_contains:
+        needle = description_contains.lower()
+        rows = [r for r in rows if needle in (r.get("description") or "").lower()]
+    if comercio_contains:
+        needle = comercio_contains.lower()
+        rows = [r for r in rows if needle in (r.get("comercio") or r.get("comercio_final") or "").lower()]
+
+    rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
+    return rows
 
 
 # ── telegram_log ───────────────────────────────────────────────────────────
