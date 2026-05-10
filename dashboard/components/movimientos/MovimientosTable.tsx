@@ -1,7 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ChevronDown } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
+import { AddCategoryModal } from "@/components/movimientos/AddCategoryModal";
+import {
+  CategoryComboboxContent,
+  CategoryComboboxPopover,
+} from "@/components/movimientos/CategoryComboboxPopover";
 import type {
   AuditEvent,
   CategoriesResponse,
@@ -120,12 +126,26 @@ export function MovimientosTable() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [categories, setCategories] = useState<CategoriesResponse | null>(null);
-  const [editingRow, setEditingRow] = useState<string | null>(null);
+  const [comboTarget, setComboTarget] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [pendingMutations, setPendingMutations] = useState<Set<string>>(new Set());
   const [ignoreTarget, setIgnoreTarget] = useState<{ ids: string[]; bulk: boolean } | null>(null);
   const [auditTarget, setAuditTarget] = useState<string | null>(null);
   const [bulkCategorize, setBulkCategorize] = useState(false);
+  const [addCatModal, setAddCatModal] = useState<{
+    movId: string | null;
+    suggestedCat: string;
+    suggestedSub: string;
+  } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+
+  const reloadCategories = useCallback(() => {
+    fetch("/api/categorias")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => {
+        if (j) setCategories(j);
+      })
+      .catch(() => {});
+  }, []);
 
   // Carga taxonomía una vez al montar.
   useEffect(() => {
@@ -165,19 +185,25 @@ export function MovimientosTable() {
     setSelected(new Set());
   }, [refresh]);
 
-  // Auto-refresh cada 30s. Lo pausamos si hay edición inline o algún modal
-  // abierto, para no perder el contexto del usuario.
-  const editingRef = useRef(editingRow);
-  editingRef.current = editingRow;
+  // Auto-refresh cada 30s. Lo pausamos si hay popover/modal abierto, para no
+  // perder el contexto del usuario.
+  const comboRef = useRef(comboTarget);
+  comboRef.current = comboTarget;
   useEffect(() => {
     if (!autoRefresh) return;
     const id = setInterval(() => {
-      if (editingRef.current === null && ignoreTarget === null && auditTarget === null && !bulkCategorize) {
+      if (
+        comboRef.current === null &&
+        ignoreTarget === null &&
+        auditTarget === null &&
+        !bulkCategorize &&
+        addCatModal === null
+      ) {
         refresh();
       }
     }, REFRESH_MS);
     return () => clearInterval(id);
-  }, [autoRefresh, refresh, ignoreTarget, auditTarget, bulkCategorize]);
+  }, [autoRefresh, refresh, ignoreTarget, auditTarget, bulkCategorize, addCatModal]);
 
   const toggleSelected = (id: string) => {
     setSelected((prev) => {
@@ -259,7 +285,7 @@ export function MovimientosTable() {
     });
     if (res.ok && res.mov) {
       replaceItem(res.mov);
-      setEditingRow(null);
+      setComboTarget(null);
       showToast("Categoría actualizada (corrected_pending)");
     } else if (res.err === "version_conflict") {
       showToast("Conflicto: actualiza la tabla antes de guardar.");
@@ -573,9 +599,9 @@ export function MovimientosTable() {
       )}
 
       {/* Tabla */}
-      <div className="overflow-auto rounded border border-slate-200 bg-white">
+      <div className="relative max-h-[calc(100vh-300px)] min-h-[300px] overflow-auto rounded border border-slate-200 bg-white">
         <table className="w-full text-xs">
-          <thead className="border-b bg-slate-50 text-left text-slate-600">
+          <thead className="sticky top-0 z-10 bg-slate-50 text-left text-slate-600 shadow-[0_1px_0_0_rgb(226_232_240)]">
             <tr>
               <th className="w-8 px-2 py-2">
                 <input
@@ -655,24 +681,23 @@ export function MovimientosTable() {
                   </td>
                   <td className="px-2 py-1.5 text-slate-700">{m.tipo ?? ""}</td>
                   <td className="px-2 py-1.5">
-                    {editingRow === m.id ? (
-                      <InlineCategoryEditor
-                        categories={categories}
-                        defaultCat={cat}
-                        defaultSub={sub}
-                        onCancel={() => setEditingRow(null)}
-                        onSave={(c2, s2) => onSaveInlineCategory(m, c2, s2)}
-                      />
-                    ) : (
-                      <button
-                        onClick={() => setEditingRow(m.id)}
-                        className="text-left text-slate-700 hover:underline"
-                        title="Click para editar"
-                      >
-                        <div>{cat || <span className="text-slate-400">(sin)</span>}</div>
-                        <div className="text-[10px] text-slate-500">{sub}</div>
-                      </button>
-                    )}
+                    <button
+                      onClick={(e) =>
+                        setComboTarget({ id: m.id, rect: e.currentTarget.getBoundingClientRect() })
+                      }
+                      className={`group inline-flex max-w-[200px] items-center gap-1 rounded-md border px-2 py-1 text-left text-xs transition ${
+                        cat
+                          ? "border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100"
+                          : "border-dashed border-slate-300 bg-slate-50 text-slate-500 hover:bg-slate-100"
+                      }`}
+                      title="Click para cambiar categoría"
+                    >
+                      <span className="flex min-w-0 flex-col leading-tight">
+                        <span className="truncate font-medium">{cat || "Sin categoría"}</span>
+                        {sub && <span className="truncate text-[10px] opacity-75">{sub}</span>}
+                      </span>
+                      <ChevronDown className="h-3 w-3 shrink-0 opacity-60 group-hover:opacity-100" />
+                    </button>
                   </td>
                   <td className="px-2 py-1.5 whitespace-nowrap">
                     {c && <span className={c.cls}>{c.label}</span>}
@@ -739,6 +764,25 @@ export function MovimientosTable() {
         </table>
       </div>
 
+      {comboTarget && (
+        <CategoryComboboxPopover
+          categories={categories}
+          anchorRect={comboTarget.rect}
+          defaultCat={items.find((m) => m.id === comboTarget.id)?.final_category ?? ""}
+          defaultSub={items.find((m) => m.id === comboTarget.id)?.final_subcategory ?? ""}
+          onSelect={(c2, s2) => {
+            const mov = items.find((m) => m.id === comboTarget.id);
+            if (mov) onSaveInlineCategory(mov, c2, s2);
+          }}
+          onClose={() => setComboTarget(null)}
+          onAddNew={(query) => {
+            const movId = comboTarget.id;
+            setComboTarget(null);
+            setAddCatModal({ movId, suggestedCat: query, suggestedSub: "" });
+          }}
+        />
+      )}
+
       {ignoreTarget && (
         <IgnoreModal
           count={ignoreTarget.ids.length}
@@ -753,6 +797,30 @@ export function MovimientosTable() {
           count={selected.size}
           onCancel={() => setBulkCategorize(false)}
           onConfirm={onBulkCategorize}
+          onAddNew={(query) => {
+            setBulkCategorize(false);
+            setAddCatModal({ movId: null, suggestedCat: query, suggestedSub: "" });
+          }}
+        />
+      )}
+
+      {addCatModal && (
+        <AddCategoryModal
+          categories={categories}
+          defaultCat={addCatModal.suggestedCat}
+          defaultSub={addCatModal.suggestedSub}
+          onCancel={() => setAddCatModal(null)}
+          onCreated={(cat, sub) => {
+            reloadCategories();
+            const target = addCatModal;
+            setAddCatModal(null);
+            if (target.movId) {
+              const mov = items.find((m) => m.id === target.movId);
+              if (mov) onSaveInlineCategory(mov, cat, sub);
+            } else {
+              onBulkCategorize(cat, sub);
+            }
+          }}
         />
       )}
 
@@ -770,83 +838,6 @@ export function MovimientosTable() {
 }
 
 // ── Sub-components ───────────────────────────────────────────────────────
-
-function InlineCategoryEditor({
-  categories,
-  defaultCat,
-  defaultSub,
-  onCancel,
-  onSave,
-}: {
-  categories: CategoriesResponse | null;
-  defaultCat: string;
-  defaultSub: string;
-  onCancel: () => void;
-  onSave: (cat: string, sub: string | null) => void;
-}) {
-  const [cat, setCat] = useState(defaultCat);
-  const [sub, setSub] = useState(defaultSub);
-  const subs = useMemo(() => (categories?.taxonomy?.[cat] ?? []), [categories, cat]);
-  const isExtensible = categories?.extensible_categories.includes(cat) ?? false;
-
-  return (
-    <div className="flex flex-col gap-1">
-      <select
-        value={cat}
-        onChange={(e) => {
-          setCat(e.target.value);
-          setSub("");
-        }}
-        className="rounded border border-slate-300 px-1 py-0.5 text-xs"
-        autoFocus
-      >
-        <option value="">— Categoría —</option>
-        {categories &&
-          Object.keys(categories.taxonomy).map((c) => (
-            <option key={c} value={c}>
-              {c}
-            </option>
-          ))}
-      </select>
-      {isExtensible ? (
-        <input
-          value={sub}
-          onChange={(e) => setSub(e.target.value)}
-          placeholder="Subcategoría (libre)"
-          className="rounded border border-slate-300 px-1 py-0.5 text-xs"
-        />
-      ) : (
-        <select
-          value={sub}
-          onChange={(e) => setSub(e.target.value)}
-          className="rounded border border-slate-300 px-1 py-0.5 text-xs"
-        >
-          <option value="">— Sub —</option>
-          {subs.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-      )}
-      <div className="flex gap-1">
-        <button
-          onClick={() => onSave(cat, sub || null)}
-          disabled={!cat}
-          className="flex-1 rounded bg-blue-600 px-2 py-0.5 text-[10px] text-white hover:bg-blue-700 disabled:opacity-50"
-        >
-          Guardar
-        </button>
-        <button
-          onClick={onCancel}
-          className="rounded border border-slate-300 px-2 py-0.5 text-[10px] hover:bg-slate-50"
-        >
-          ✕
-        </button>
-      </div>
-    </div>
-  );
-}
 
 function IgnoreModal({
   count,
@@ -899,75 +890,38 @@ function BulkCategorizeModal({
   count,
   onCancel,
   onConfirm,
+  onAddNew,
 }: {
   categories: CategoriesResponse | null;
   count: number;
   onCancel: () => void;
   onConfirm: (cat: string, sub: string | null) => void;
+  onAddNew: (suggestedQuery: string) => void;
 }) {
-  const [cat, setCat] = useState("");
-  const [sub, setSub] = useState("");
-  const subs = useMemo(() => (categories?.taxonomy?.[cat] ?? []), [categories, cat]);
-  const isExtensible = categories?.extensible_categories.includes(cat) ?? false;
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/30 p-4">
-      <div className="w-full max-w-md rounded-lg bg-white p-4 shadow-xl">
-        <h2 className="text-base font-semibold text-slate-900">
-          Recategorizar {count} movimiento{count === 1 ? "" : "s"}
-        </h2>
-        <p className="mt-1 text-xs text-slate-500">
-          Quedarán como corrected_pending — apruébalos individual o en bulk para enviarlos a Google Sheet.
-        </p>
-        <select
-          value={cat}
-          onChange={(e) => {
-            setCat(e.target.value);
-            setSub("");
-          }}
-          className="mt-3 w-full rounded border border-slate-300 px-2 py-1 text-sm"
-        >
-          <option value="">— Categoría —</option>
-          {categories &&
-            Object.keys(categories.taxonomy).map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-        </select>
-        {isExtensible ? (
-          <input
-            value={sub}
-            onChange={(e) => setSub(e.target.value)}
-            placeholder="Subcategoría (libre)"
-            className="mt-2 w-full rounded border border-slate-300 px-2 py-1 text-sm"
-          />
-        ) : (
-          <select
-            value={sub}
-            onChange={(e) => setSub(e.target.value)}
-            className="mt-2 w-full rounded border border-slate-300 px-2 py-1 text-sm"
-          >
-            <option value="">— Subcategoría —</option>
-            {subs.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        )}
-        <div className="mt-3 flex justify-end gap-2">
+      <div className="w-full max-w-md rounded-lg bg-white shadow-xl">
+        <div className="border-b border-slate-100 px-4 py-3">
+          <h2 className="text-base font-semibold text-slate-900">
+            Recategorizar {count} movimiento{count === 1 ? "" : "s"}
+          </h2>
+          <p className="mt-1 text-xs text-slate-500">
+            Quedarán como corrected_pending — apruébalos individual o en bulk para enviarlos a Google Sheet.
+          </p>
+        </div>
+        <CategoryComboboxContent
+          categories={categories}
+          defaultCat=""
+          defaultSub=""
+          onSelect={(cat, sub) => onConfirm(cat, sub)}
+          onAddNew={onAddNew}
+        />
+        <div className="flex justify-end gap-2 border-t border-slate-100 px-4 py-3">
           <button
             onClick={onCancel}
             className="rounded border border-slate-300 px-3 py-1 text-sm hover:bg-slate-50"
           >
             Cancelar
-          </button>
-          <button
-            onClick={() => onConfirm(cat, sub || null)}
-            disabled={!cat}
-            className="rounded bg-violet-600 px-3 py-1 text-sm text-white hover:bg-violet-700 disabled:opacity-50"
-          >
-            Aplicar
           </button>
         </div>
       </div>

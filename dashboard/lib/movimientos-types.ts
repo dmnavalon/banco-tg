@@ -99,6 +99,14 @@ export interface CategoriesResponse {
   extensible_categories: string[];
 }
 
+export interface CreateCategoryResponse {
+  created: boolean;
+  cat: string;
+  sub: string;
+  taxonomy: Record<string, string[]>;
+  similar: { cats: string[]; subs: string[] };
+}
+
 // Filtros que el dashboard pasa al backend. Mapean 1:1 a query params.
 export interface MovementsFilters {
   status?: string;             // "pending" | "pending,corrected_pending" | "all"

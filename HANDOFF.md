@@ -471,6 +471,12 @@ Sección agregada 2026-05-09. Permite revisar/aprobar/corregir/ignorar movimient
 - Endpoint `GET /api/movements/<id>/audit` y drawer en el dashboard.
 - TTL 90 días recomendado (configurar en Cloud Console o agregar script).
 
+### Taxonomy overrides (cats/subs creadas desde el dashboard)
+- Base hardcoded vive en `src/classifier._BASE_TAXONOMY`. La función `classifier.get_taxonomy()` mergea esa base con docs de la collection `taxonomy_overrides` (1 doc por cat: `{cat, subs: [], updated_at}`) y cachea por 60s. POST `/api/categories` invalida el cache.
+- El bot Telegram usa el mismo `get_taxonomy()` al clasificar — las cats/subs nuevas son visibles en los siguientes movimientos sin restart.
+- **OJO**: si Diego crea una **categoría raíz nueva** desde el dashboard, las vistas del dashboard financiero (gráficos / presupuesto) que agrupan por las 25 cats originales NO la mostrarán automáticamente. Las **subs nuevas** dentro de cats existentes no tienen este problema. Si esto se vuelve relevante, ampliar el dashboard financiero para leer cats dinámicamente.
+- `INCOME_CATEGORIES` y `INTERNAL_CATEGORIES` quedan estáticas: el endpoint POST rechaza intentos de crear subs en esas (422). Tampoco hay UI para crear cats raíz dentro de esas familias — protege la coherencia del clasificador IA.
+
 ### Feature flag y rollback
 - Backend: `ENABLE_MOVIMIENTOS_REVIEW=false` en Railway → API thread no levanta. Bot sigue funcionando con dual-write a `status` legacy.
 - Frontend: `NEXT_PUBLIC_ENABLE_MOVIMIENTOS_REVIEW=false` en Vercel → link "Movimientos" se oculta y los route handlers responden 404.

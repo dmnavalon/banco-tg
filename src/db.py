@@ -740,3 +740,44 @@ def get_pending_correction(prompt_message_id: str) -> dict | None:
 
 def delete_pending_correction(prompt_message_id: str) -> None:
     delete_pending_user_action(prompt_message_id)
+
+
+# ── taxonomy_overrides (cats/subs creadas por el usuario en el dashboard) ─
+# El catálogo base vive hardcoded en classifier._BASE_TAXONOMY. Cuando Diego
+# crea una combinación nueva desde el dashboard, se persiste acá. El classifier
+# lee ambos al clasificar (ver classifier.get_taxonomy()).
+
+def add_taxonomy_override(cat: str, sub: str) -> None:
+    """Idempotente: dedupea por lectura+escritura. La cantidad de overrides es
+    chica (decenas), no vale la pena ArrayUnion + transacción para el caso real
+    (un solo usuario creando desde el dashboard). Si hace falta concurrencia
+    real, envolver en run_txn."""
+    ref = _db().collection("taxonomy_overrides").document(cat)
+    snap = ref.get()
+    existing: list[str] = []
+    if snap.exists:
+        data = snap.to_dict() or {}
+        raw = data.get("subs") or []
+        if isinstance(raw, list):
+            existing = [s for s in raw if isinstance(s, str)]
+    if sub in existing:
+        ref.set({"updated_at": _now()}, merge=True)
+        return
+    new_subs = list(existing) + [sub]
+    ref.set({
+        "cat": cat,
+        "subs": new_subs,
+        "updated_at": _now(),
+    }, merge=True)
+
+
+def list_taxonomy_overrides() -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for doc in _db().collection("taxonomy_overrides").stream():
+        data = doc.to_dict() or {}
+        subs = data.get("subs") or []
+        if isinstance(subs, list):
+            clean = [s for s in subs if isinstance(s, str) and s.strip()]
+            if clean:
+                out[doc.id] = clean
+    return out

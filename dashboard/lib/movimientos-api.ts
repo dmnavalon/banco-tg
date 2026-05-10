@@ -7,6 +7,7 @@ import type {
   AuditEvent,
   BulkResults,
   CategoriesResponse,
+  CreateCategoryResponse,
   MovementsFilters,
   Movimiento,
 } from "./movimientos-types";
@@ -76,6 +77,22 @@ export async function getCategories(): Promise<CategoriesResponse> {
   const r = await fetchBackend(`/api/categories`);
   if (!r.ok) throw new Error(`getCategories ${r.status}`);
   return r.json();
+}
+
+export async function createCategory(
+  payload: { cat: string; sub: string },
+): Promise<{ status: number; body: CreateCategoryResponse | { error: string; message?: string } }> {
+  const r = await fetchBackend(`/api/categories`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  let body: unknown;
+  try {
+    body = await r.json();
+  } catch {
+    body = { error: "non_json_response" };
+  }
+  return { status: r.status, body: body as CreateCategoryResponse | { error: string; message?: string } };
 }
 
 interface MutationResult {

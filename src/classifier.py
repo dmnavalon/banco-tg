@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 from typing import NamedTuple
 
 from . import db
@@ -9,8 +11,13 @@ from .utils import get_logger
 log = get_logger("classifier")
 
 # ── Taxonomía autorizada ──────────────────────────────────────────────────────
+# `_BASE_TAXONOMY` es la base hardcoded del proyecto. La función `get_taxonomy()`
+# mergea esta base con las cats/subs creadas por el usuario desde el dashboard
+# (colección Firestore `taxonomy_overrides`) y cachea el resultado por
+# `_TAX_TTL` segundos. El endpoint que crea overrides invalida el cache para
+# que el siguiente movimiento clasificado vea la nueva combinación.
 
-TAXONOMY: dict[str, list[str]] = {
+_BASE_TAXONOMY: dict[str, list[str]] = {
     # INGRESOS
     "Sueldo":                       ["Sueldo principal", "Sueldo secundario"],
     "Honorarios":                   ["Boletas de honorarios"],
@@ -48,6 +55,46 @@ INTERNAL_CATEGORIES = {"Transferencias internas"}
 # Categorías cuyas subcategorías son extensibles: el LLM puede proponer una nueva
 # y se acepta tal cual (en vez de forzarla a la primera de TAXONOMY[cat]).
 EXTENSIBLE_CATEGORIES = {"Gastos por rendir"}
+
+_TAX_TTL = 60.0
+_TAX_LOCK = threading.Lock()
+_TAX_CACHE: dict[str, list[str]] | None = None
+_TAX_CACHE_AT: float = 0.0
+
+
+def get_taxonomy() -> dict[str, list[str]]:
+    """Devuelve la taxonomía vigente: base hardcoded + overrides de Firestore.
+
+    Cachea durante `_TAX_TTL` segundos para no martillar Firestore en cada
+    clasificación. El cache es por proceso; el endpoint POST /api/categories
+    llama `invalidate_taxonomy_cache()` tras escribir para que el siguiente
+    movimiento (en este proceso) vea la nueva combinación inmediatamente.
+    """
+    global _TAX_CACHE, _TAX_CACHE_AT
+    now = time.time()
+    with _TAX_LOCK:
+        if _TAX_CACHE is not None and now - _TAX_CACHE_AT < _TAX_TTL:
+            return _TAX_CACHE
+        merged: dict[str, list[str]] = {cat: list(subs) for cat, subs in _BASE_TAXONOMY.items()}
+        try:
+            overrides = db.list_taxonomy_overrides()
+        except Exception as e:
+            log.warning(f"No pude leer taxonomy_overrides ({type(e).__name__}: {e}); uso base.")
+            overrides = {}
+        for cat, subs in overrides.items():
+            bucket = merged.setdefault(cat, [])
+            for sub in subs:
+                if sub and sub not in bucket:
+                    bucket.append(sub)
+        _TAX_CACHE = merged
+        _TAX_CACHE_AT = now
+        return merged
+
+
+def invalidate_taxonomy_cache() -> None:
+    global _TAX_CACHE
+    with _TAX_LOCK:
+        _TAX_CACHE = None
 
 AGENT_MODEL = "claude-haiku-4-5-20251001"
 AGENT_MAX_TOKENS = 1024
@@ -138,7 +185,8 @@ def _classify_with_agent(description: str, amount: float, hint: str | None = Non
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    taxonomy_lines = "\n".join(f"- {cat}: {', '.join(subs)}" for cat, subs in TAXONOMY.items())
+    taxonomy = get_taxonomy()
+    taxonomy_lines = "\n".join(f"- {cat}: {', '.join(subs)}" for cat, subs in taxonomy.items())
     flow = "positivo (ingreso)" if amount > 0 else "negativo (gasto/egreso)"
 
     tool_def = {
@@ -212,7 +260,7 @@ def _classify_with_agent(description: str, amount: float, hint: str | None = Non
     # Si el usuario dio un hint, respetar lo que el LLM devolvió aunque sea una
     # cat/sub nueva (es probablemente intencional). Si no hubo hint, forzar a la
     # taxonomía conocida para no inventar.
-    if cat not in TAXONOMY:
+    if cat not in taxonomy:
         if hint and cat:
             log.info(f"Categoría nueva propuesta vía hint: {cat!r}. Aceptando tal cual.")
             requiere_revision = True
@@ -224,7 +272,7 @@ def _classify_with_agent(description: str, amount: float, hint: str | None = Non
         else:
             cat = "Otros ingresos" if amount > 0 else "Otros"
             sub = "Ingresos extraordinarios" if amount > 0 else "Gastos no clasificados"
-    elif sub not in TAXONOMY[cat]:
+    elif sub not in taxonomy[cat]:
         if cat in EXTENSIBLE_CATEGORIES and sub:
             # categorías extensibles (ej. Gastos por rendir) aceptan subcat libre.
             log.info(f"Subcategoría libre aceptada para {cat}: {sub!r}")
@@ -234,13 +282,13 @@ def _classify_with_agent(description: str, amount: float, hint: str | None = Non
             log.info(f"Subcategoría NUEVA inducida por hint en {cat}: {sub!r}")
             requiere_revision = True
             if not pregunta:
-                similares = ", ".join(TAXONOMY[cat][:5])
+                similares = ", ".join(taxonomy[cat][:5])
                 pregunta = (
                     f"Sub-categoría NUEVA propuesta: «{sub}» dentro de «{cat}». "
                     f"¿La uso así o prefieres mapear a una existente como: {similares}?"
                 )
         else:
-            sub = TAXONOMY[cat][0]
+            sub = taxonomy[cat][0]
 
     com_raw = parsed.get("comercio")
     comercio = com_raw if (com_raw and str(com_raw).lower() not in {"null", "none", ""}) else None
