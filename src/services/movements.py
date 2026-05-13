@@ -178,6 +178,8 @@ def approve_movement(
             details={"final_category": updated.get("final_category"),
                      "final_subcategory": updated.get("final_subcategory")},
         )
+        from .. import screenshot_storage
+        screenshot_storage.delete(mov_id)
         if not skip_sync:
             updated = sync_approved_movement_to_sheet(mov_id, actor=actor, source=source)
     return updated
@@ -233,6 +235,8 @@ def approve_corrected_movement(
             source=source,
             details={},
         )
+        from .. import screenshot_storage
+        screenshot_storage.delete(mov_id)
         if not skip_sync:
             updated = sync_approved_movement_to_sheet(mov_id, actor=actor, source=source)
     return updated
@@ -391,6 +395,8 @@ def ignore_movement(
             source=source,
             details={"reason": reason[:200]},
         )
+        from .. import screenshot_storage
+        screenshot_storage.delete(mov_id)
     return updated
 
 

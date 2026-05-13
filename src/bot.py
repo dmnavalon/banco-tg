@@ -548,7 +548,7 @@ def _handle_wizard_input(text: str, chat_id: str, state: dict[str, Any]) -> None
         # Releer y mandar tarjeta nueva con la sugerencia actualizada.
         movs = db.get_movements_by_ids([mov_id])
         if movs:
-            telegram_notify.send_movement_cards([movs[0]])
+            telegram_notify.resend_movement_card(movs[0])
         return
 
     if state_name.startswith("awaiting_rut_"):
@@ -610,7 +610,7 @@ def _handle_correction_reply(text: str, chat_id: str, pending: dict, prompt_msg_
 
     if text.strip().lower() in {"cancelar", "cancel", "abort", "abortar", "salir"}:
         # Reenviar la tarjeta original con sus botones (nueva tarjeta, fresh).
-        telegram_notify.send_movement_cards([mov])
+        telegram_notify.resend_movement_card(mov)
         _send("✖️ Corrección cancelada.")
         return
 
@@ -657,7 +657,7 @@ def _handle_correction_reply(text: str, chat_id: str, pending: dict, prompt_msg_
 
     refreshed = db.get_movements_by_ids([mov_id])
     if refreshed:
-        telegram_notify.send_movement_cards([refreshed[0]])
+        telegram_notify.resend_movement_card(refreshed[0])
 
 
 def _handle_ignore_reply(text: str, chat_id: str, pending: dict, prompt_msg_id: str) -> None:
@@ -688,7 +688,7 @@ def _handle_ignore_reply(text: str, chat_id: str, pending: dict, prompt_msg_id: 
 
     if text_lower in {"cancelar", "cancel", "abort", "abortar", "salir"}:
         # Reenviar la tarjeta original con sus 3 botones.
-        telegram_notify.send_movement_cards([mov])
+        telegram_notify.resend_movement_card(mov)
         _send("✖️ Ignore cancelado.")
         return
 

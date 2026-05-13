@@ -37,7 +37,9 @@ def _db():
             path = project_path("data", "firebase_service_account.json")
             cred = credentials.Certificate(str(path))
         if not firebase_admin._apps:
-            firebase_admin.initialize_app(cred)
+            firebase_admin.initialize_app(cred, {
+                "storageBucket": "control-gastos-c53b6.firebasestorage.app",
+            })
         _client = fstore.client()
     return _client
 
