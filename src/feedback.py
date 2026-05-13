@@ -139,7 +139,7 @@ def apply(text: str, chat_id: str) -> str:
 
     refreshed = db.get_movements_by_ids([mov_id])
     if refreshed:
-        telegram_notify.send_movement_cards([refreshed[0]])
+        telegram_notify.resend_movement_card(refreshed[0])
     return f"🔁 Re-categorizando #{idx} con: «{rest[:60]}»"
 
 

@@ -7,7 +7,7 @@ import traceback
 from datetime import datetime
 from typing import Callable
 
-from . import classifier, db, scraper, secrets_store, telegram_notify
+from . import classifier, db, screenshot_storage, scraper, secrets_store, telegram_notify
 from .utils import get_logger
 
 log = get_logger("run_daily")
@@ -90,6 +90,11 @@ def run_for_bank_full(
             requiere_revision=cls.requiere_revision,
             pregunta_sugerida=cls.pregunta_sugerida,
         )
+        # Subir el screenshot a Storage para que sobreviva al cierre de este
+        # proceso. Sin esto, los movs en overflow llegan a /next o /pending
+        # solo como texto porque `screenshot_bytes` vive solo en memoria.
+        if mov.get("screenshot_bytes"):
+            screenshot_storage.upload(mov["id"], mov["screenshot_bytes"])
         classified.append({
             **mov,
             "suggested_category": cls.category,

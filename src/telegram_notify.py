@@ -489,6 +489,10 @@ def _send_one_card(mov: dict, target: str) -> bool:
     screenshot = mov.get("screenshot_bytes")
     file_id = mov.get("tg_photo_file_id")
 
+    if not screenshot and not file_id:
+        from . import screenshot_storage
+        screenshot = screenshot_storage.download(mov_id)
+
     base_url = f"{TG_API}/bot{_bot_token()}"
 
     for delay in [0, 2, 5]:
@@ -574,7 +578,11 @@ def send_movement_cards(movements: Sequence[dict]) -> bool:
             payload=",".join(ids_sent),
         )
 
-    # Persistir los IDs restantes para que /next los recupere.
+    # Persistir los IDs restantes para que /next los recupere. Solo escribimos
+    # cuando hay overflow real — NO limpiamos en el else, porque esta función
+    # también se reusaba para reenviar un solo movimiento tras correcciones y
+    # cancelaciones, lo que borraba la cola legítima del cron. Ahora los resends
+    # de una sola card usan `resend_movement_card` (no toca `last_batch_*`).
     if overflow:
         overflow_ids = [m["id"] for m in overflow]
         db.set_config("last_batch_remaining", ",".join(overflow_ids))
@@ -583,14 +591,18 @@ def send_movement_cards(movements: Sequence[dict]) -> bool:
             f"Para los próximos {min(BATCH_PAGE_SIZE, len(overflow))}, mándame /next.\n"
             f"Quedan {len(overflow)} pendientes en cola."
         )
-    else:
-        # No hay más: limpiar el overflow por si quedó residual.
-        try:
-            db.set_config("last_batch_remaining", "")
-        except Exception:
-            pass
 
     return len(ids_sent) == len(first_page)
+
+
+def resend_movement_card(mov: dict) -> bool:
+    """Reenvía UNA card sin tocar el estado de batch (`last_batch_*`).
+
+    Usar este path cuando el bot reenvía una sola tarjeta tras correcciones,
+    cancelaciones, o un /test puntual. `send_movement_cards([single])` lo
+    hace funcionalmente pero pisa `last_batch_payload` y borraba la cola del cron.
+    """
+    return _send_one_card(mov, _chat_id())
 
 
 def send_next_batch_page() -> str:
