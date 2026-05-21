@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import concurrent.futures
+import os
 import re
 import sys
 import time
@@ -7,7 +9,9 @@ import traceback
 from datetime import datetime
 from typing import Callable
 
-from . import classifier, db, screenshot_storage, scraper, secrets_store, telegram_notify
+from adapters.base import CredentialsRejected
+
+from . import classifier, db, scraper, secrets_store, telegram_notify
 from .utils import get_logger
 
 log = get_logger("run_daily")
@@ -62,7 +66,10 @@ def run_for_bank_full(
         if progress:
             progress(msg)
 
-    creds = secrets_store.load(bank)
+    try:
+        creds = secrets_store.load(bank)
+    except secrets_store.CredentialDecryptError as e:
+        raise RuntimeError(str(e)) from e
     if not creds:
         raise RuntimeError(f"No hay credenciales configuradas para {bank}.")
     rut, password = creds
@@ -90,11 +97,15 @@ def run_for_bank_full(
             requiere_revision=cls.requiere_revision,
             pregunta_sugerida=cls.pregunta_sugerida,
         )
-        # Subir el screenshot a Storage para que sobreviva al cierre de este
-        # proceso. Sin esto, los movs en overflow llegan a /next o /pending
-        # solo como texto porque `screenshot_bytes` vive solo en memoria.
-        if mov.get("screenshot_bytes"):
-            screenshot_storage.upload(mov["id"], mov["screenshot_bytes"])
+        # Persistencia de fotos (2026-05-15): NO usamos Firebase Storage
+        # (el proyecto está en plan Spark sin Storage habilitado, y Blaze
+        # requiere tarjeta). En su lugar, las fotos se persisten implícitamente
+        # vía `tg_photo_file_id`: `send_card` envía la foto a TG, captura el
+        # file_id del response, y `db.set_movement_photo_file_id` lo guarda en
+        # Firestore. El file_id no expira y permite reenviar sin re-uploading.
+        # Trade-off: si un mov queda en overflow (no se envía en el batch del
+        # daily), `/pending` o `/next` lo muestran solo como texto (no hay
+        # file_id todavía). Aceptable mientras los batches sean <20 movs.
         classified.append({
             **mov,
             "suggested_category": cls.category,
@@ -117,15 +128,39 @@ def main() -> int:
         log.warning("Sin bancos configurados — saliendo.")
         return 0
 
+    # Timeout duro por banco para evitar que un Playwright colgado congele todo
+    # el daily. Configurable vía env var (default 10 min).
+    bank_timeout = int(os.environ.get("BANK_TIMEOUT_SECONDS", "600"))
     otp_provider = make_otp_provider()
     all_new: list[dict] = []
     errors: list[str] = []
 
     for bank in banks:
         try:
-            new = run_for_bank_full(bank, otp_provider)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_for_bank_full, bank, otp_provider)
+                try:
+                    new = future.result(timeout=bank_timeout)
+                except concurrent.futures.TimeoutError as e:
+                    # No podemos cancelar de manera limpia un Playwright colgado;
+                    # dejamos que el thread daemon muera al salir el proceso.
+                    raise RuntimeError(
+                        f"Timeout de {bank_timeout}s para {bank} — adapter probablemente colgado."
+                    ) from e
             all_new.extend(new)
             log.info(f"{bank}: {len(new)} movimientos nuevos.")
+        except CredentialsRejected as e:
+            # El banco rechazó la credencial. Pausar este banco hasta que el
+            # usuario re-ingrese con /cred — evita que el cron siga quemando
+            # intentos fallidos y arrime la cuenta al bloqueo.
+            secrets_store.mark_invalid(bank, str(e))
+            tb = traceback.format_exc()
+            db.record_error(component=f"run_daily.{bank}", message=str(e), traceback=tb)
+            errors.append(f"[{bank}] credenciales rechazadas; banco pausado hasta /cred {bank}")
+            telegram_notify.send_message(
+                f"⚠️ [{bank}] credenciales rechazadas por el banco. "
+                f"Banco PAUSADO hasta que hagas /cred {bank}.\n\nMensaje del banco: {e}"
+            )
         except Exception as e:
             tb = traceback.format_exc()
             db.record_error(component=f"run_daily.{bank}", message=str(e), traceback=tb)

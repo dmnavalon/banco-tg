@@ -36,13 +36,27 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
     launch_args = [
         "--disable-blink-features=AutomationControlled",
         "--disable-dev-shm-usage",
+        # Mitigaciones anti-bot añadidas 2026-05-15: ambos bancos (BCh y Falabella)
+        # detectan headless por features de Chromium. Sin estos flags, la SPA
+        # de BCh nunca bootea (body queda solo con <div id="header/main/footer">)
+        # y Falabella renderiza el dashboard sin botones (`Botones visibles: []`).
+        # Verificado en non-headless: ambos sitios funcionan end-to-end con la
+        # misma sesión. El delta es exclusivamente del modo headless de Chromium.
+        "--disable-features=IsolateOrigins,site-per-process,AutomationControlled",
+        "--disable-site-isolation-trials",
+        "--disable-web-security",
     ]
     if headless:
         # En Docker/Railway no hay sandbox por defecto; sin --no-sandbox falla.
         launch_args.append("--no-sandbox")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless, args=launch_args)
+        # slow_mo añade un delay entre cada acción de Playwright. BCh tiene
+        # detección anti-bot por velocidad: sin slow_mo, el portal devuelve
+        # «Los datos ingresados no son correctos» incluso con credenciales
+        # válidas (replicable comparando con `scripts/debug_bch_login.py`,
+        # que sí tiene slow_mo y sí entra al dashboard).
+        browser = p.chromium.launch(headless=headless, slow_mo=150, args=launch_args)
         context_kwargs: dict = {
             "user_agent": (
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -74,6 +88,28 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
                 log.warning(f"{state_file.name} corrupto, ignorando.")
 
         context = browser.new_context(**context_kwargs)
+
+        # Anti-detection (añadido 2026-05-15): enmascarar señales típicas que
+        # los sitios usan para detectar Chromium headless. Ejecutado antes de
+        # cualquier JS de la página vía `add_init_script`. Verificado: con esto
+        # la SPA de BCh bootea en headless (sin esto, el shell queda vacío
+        # esperando indefinidamente `System.import('./portal-persona-root-config.js')`).
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [{name: 'Chrome PDF Plugin'}, {name: 'Chrome PDF Viewer'}, {name: 'Native Client'}]
+            });
+            Object.defineProperty(navigator, 'languages', { get: () => ['es-CL', 'es', 'en-US', 'en'] });
+            Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
+            window.chrome = { runtime: {}, loadTimes: function(){}, csi: function(){} };
+            const origQuery = window.navigator.permissions.query;
+            window.navigator.permissions.query = (parameters) => (
+                parameters.name === 'notifications'
+                    ? Promise.resolve({state: Notification.permission})
+                    : origQuery(parameters)
+            );
+        """)
+
         page = context.new_page()
 
         try:
@@ -93,7 +129,41 @@ def run_for_bank(bank: str, rut: str, password: str, otp_provider: Callable[[str
             except Exception as e:
                 log.warning(f"No pude guardar storage_state: {e}")
 
-            raw_movements = adapter.fetch_movements(page)
+            # Optimización (2026-05-15): solo capturar screenshot del modal
+            # de detalle para movs que NO existen ya en DB. Antes capturábamos
+            # ~92 fotos en Falabella aunque solo 3 fueran nuevas — proceso
+            # tomaba 5-7 min extra por nada. Construimos un closure que computa
+            # el movement_id en vivo (replicando el cálculo de dup_idx que el
+            # bloque post-fetch hace abajo) y consulta Firestore.
+            _live_dup_counts: dict[tuple, int] = {}
+
+            def _should_capture_screenshot(mov: dict) -> bool:
+                if not mov.get("date") or not mov.get("description"):
+                    return False
+                amount = float(mov.get("amount") or 0.0)
+                account = mov.get("account") or bank
+                dup_key = (mov["date"], amount, mov["description"], account)
+                dup_idx = _live_dup_counts.get(dup_key, 0)
+                _live_dup_counts[dup_key] = dup_idx + 1
+                mid = movement_id(
+                    date_iso=mov["date"],
+                    amount=amount,
+                    description=mov["description"],
+                    bank=bank,
+                    account=account,
+                    dup_idx=dup_idx,
+                )
+                try:
+                    return db.get_movement_by_id(mid) is None
+                except Exception as e:
+                    # Si Firestore falla, no perder fotos: capturar igual.
+                    log.warning(f"get_movement_by_id falló para {mid}: {e}. Capturando screenshot por las dudas.")
+                    return True
+
+            raw_movements = adapter.fetch_movements(
+                page,
+                screenshot_predicate=_should_capture_screenshot,
+            )
         finally:
             try:
                 context.close()

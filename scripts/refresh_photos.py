@@ -67,7 +67,10 @@ def _load_pending_without_photo(bank: str) -> dict[str, dict]:
 def _scrape_with_screenshots(bank: str) -> list[dict]:
     """Re-corre el adapter `bank` con Playwright y devuelve todos los movimientos
     parseados (incluyendo los que ya existen en Firestore), con sus screenshot_bytes."""
-    creds = secrets_store.load(bank)
+    try:
+        creds = secrets_store.load(bank)
+    except secrets_store.CredentialDecryptError as e:
+        raise RuntimeError(str(e)) from e
     if not creds:
         raise RuntimeError(f"No hay credenciales para {bank}. Configura con /cred {bank}.")
     rut, password = creds
@@ -122,13 +125,14 @@ def _scrape_with_screenshots(bank: str) -> list[dict]:
     return raws
 
 
-def _build_mov_id(raw: dict, bank: str) -> str:
+def _build_mov_id(raw: dict, bank: str, dup_idx: int = 0) -> str:
     return movement_id(
         date_iso=raw["date"],
         amount=float(raw.get("amount") or 0),
         description=raw["description"],
         bank=bank,
         account=raw.get("account") or bank,
+        dup_idx=dup_idx,
     )
 
 
@@ -147,10 +151,15 @@ def main(bank: str) -> int:
 
     raws = _scrape_with_screenshots(bank)
     matched: list[dict] = []
+    dup_counts: dict[tuple, int] = {}
     for raw in raws:
         if not raw or not raw.get("date") or not raw.get("description"):
             continue
-        mid = _build_mov_id(raw, bank)
+        amount = float(raw.get("amount") or 0)
+        dup_key = (raw["date"], amount, raw["description"], raw.get("account") or bank)
+        dup_idx = dup_counts.get(dup_key, 0)
+        dup_counts[dup_key] = dup_idx + 1
+        mid = _build_mov_id(raw, bank, dup_idx=dup_idx)
         if mid not in pendientes:
             continue
         # Enriquecer el dict de Firestore con los screenshot_bytes recién capturados,

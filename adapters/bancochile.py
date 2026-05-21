@@ -10,6 +10,7 @@ from src.utils import get_logger, parse_chilean_date, parse_clp_amount
 
 from .base import (
     CaptchaPresent,
+    CredentialsRejected,
     LoginFailed,
     ScraperBroken,
     TwoFARequired,
@@ -282,11 +283,20 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
         # La doble validación detectó sesión inválida. Limpiar TODO el storage
         # antes del re-login para evitar que el form arrastre estado viejo
         # (inputs auto-rellenados, error messages residuales, etc.).
+        # Cookies + localStorage + sessionStorage: si solo limpiamos cookies,
+        # Auth0 lee tokens viejos de localStorage y los envía corruptos al
+        # backend, que responde con «Los datos ingresados no son correctos»
+        # incluso con credenciales válidas (rechazo evasivo, no real).
         try:
             page.context.clear_cookies()
             log.info("Cookies del contexto limpiadas para forzar login fresh.")
         except Exception as e:
             log.warning(f"No pude limpiar cookies: {e}")
+        try:
+            page.evaluate("() => { try { localStorage.clear(); sessionStorage.clear(); } catch(e) {} }")
+            log.info("localStorage y sessionStorage limpiados.")
+        except Exception as e:
+            log.warning(f"No pude limpiar storage: {e}")
         page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=30000)
         page.wait_for_timeout(2500)
         _log_state(page, "post-goto-login-fresh")
@@ -318,6 +328,43 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
         disabled_attr = submit_loc.get_attribute("disabled")
         is_aria_disabled = (submit_loc.get_attribute("aria-disabled") or "").lower() == "true"
         log.info(f"Submit antes de click: disabled={disabled_attr!r} aria-disabled={is_aria_disabled}")
+
+        # Diagnóstico: leer los valores reales que quedaron en los inputs después
+        # del tipeo. Si BCh rechaza credenciales pero el usuario confirma que la
+        # clave es correcta manualmente, los valores aquí permiten distinguir entre:
+        #   (a) listener Angular normalizando/reseteando el campo entre keystrokes
+        #   (b) la clave tipeada llega íntegra y BCh rechaza por anti-bot
+        try:
+            actual = page.evaluate("""
+                () => {
+                    const rut = document.querySelector('#ppriv_per-login-click-input-rut');
+                    const pw = document.querySelector('#ppriv_per-login-click-input-password');
+                    return {
+                        rut_value: rut ? rut.value : null,
+                        pw_length: pw ? (pw.value || '').length : null,
+                        rut_focused: document.activeElement === rut,
+                        pw_focused: document.activeElement === pw,
+                    };
+                }
+            """)
+            log.info(
+                f"Valores reales pre-submit: rut={actual.get('rut_value')!r} (esperado: {rut_formatted!r}) "
+                f"pw_length={actual.get('pw_length')} (esperado: {len(password)}) "
+                f"rut_focused={actual.get('rut_focused')} pw_focused={actual.get('pw_focused')}"
+            )
+            if actual.get("rut_value") != rut_formatted:
+                log.warning(
+                    f"⚠ RUT en el DOM ({actual.get('rut_value')!r}) NO coincide con lo tipeado "
+                    f"({rut_formatted!r}). Angular probablemente está normalizando/reseteando."
+                )
+            if actual.get("pw_length") != len(password):
+                log.warning(
+                    f"⚠ Largo de clave en el DOM ({actual.get('pw_length')}) NO coincide con lo tipeado "
+                    f"({len(password)}). Angular probablemente está normalizando/reseteando."
+                )
+        except Exception as e:
+            log.warning(f"No pude leer valores pre-submit: {e}")
+
         if disabled_attr is not None or is_aria_disabled:
             _log_state(page, "submit-disabled-pre-click")
             raise LoginFailed(
@@ -351,7 +398,7 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
         except Exception:
             body_text = ""
         if "datos ingresados no son correctos" in body_text or "rut o contraseña" in body_text or "clave incorrecta" in body_text:
-            raise LoginFailed(
+            raise CredentialsRejected(
                 "Banco de Chile rechazó las credenciales (mensaje del banco: "
                 "«Los datos ingresados no son correctos»). Verifica con /forget bancochile "
                 "y /cred bancochile que el RUT esté en formato 12345678-9 sin puntos y la "
@@ -381,7 +428,89 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
     raise LoginFailed(f"Banco de Chile no avanzó al dashboard tras login. URL actual: {page.url}")
 
 
-def _read_current_page(page: Page) -> list[dict]:
+SEL_RECEIPT_PANEL = [
+    "mat-sidenav",
+    "mat-drawer",
+    ".mat-sidenav",
+    ".mat-drawer",
+    'aside[role="dialog"]',
+    ".cdk-overlay-pane",
+    '[class*="panel-detail"]',
+    '[class*="detail-panel"]',
+    '[class*="side-panel"]',
+]
+
+
+def _capture_receipt_screenshot(page: Page, row) -> bytes | None:
+    """Por cada movimiento: click en el botón `+` (icon-ion-plus) para expandir
+    detalle, luego click en `Ver comprobante`, captura el panel lateral, y
+    cierra todo. Devuelve PNG o None si falla.
+
+    Defensivo: si cualquier paso falla, intenta cerrar el panel/colapsar la
+    fila para no romper la iteración de movimientos siguientes.
+    """
+    png: bytes | None = None
+    expanded = False
+    try:
+        # 1. Click en el botón '+' adentro de la fila para expandir detalle.
+        #    El `<i>` no siempre es clickeable; subimos al ancestro clickeable.
+        plus = row.locator("i.icon-ion-plus").first
+        plus.wait_for(state="visible", timeout=4000)
+        plus.click(timeout=4000)
+        expanded = True
+        page.wait_for_timeout(600)
+
+        # 2. Click en 'Ver comprobante'. Buscamos globalmente porque BCh suele
+        #    renderizar el botón en un overlay/expansion fuera del <tr>. Usamos
+        #    el primer match visible para evitar clickear el de una fila vieja.
+        ver = page.locator('span.btn-text:has-text("Ver comprobante")').first
+        ver.wait_for(state="visible", timeout=5000)
+        ver.click(timeout=4000)
+        page.wait_for_timeout(800)
+
+        # 3. Capturar el panel lateral (Angular Material sidenav/drawer/overlay).
+        panel = None
+        for sel in SEL_RECEIPT_PANEL:
+            loc = page.locator(sel).first
+            try:
+                if loc.is_visible(timeout=600):
+                    panel = loc
+                    break
+            except Exception:
+                continue
+        if panel is None:
+            log.warning("BCh: no encontré panel de comprobante visible, screenshot de viewport.")
+            page.wait_for_timeout(400)
+            png = page.screenshot(full_page=False, timeout=6000)
+        else:
+            page.wait_for_timeout(400)  # esperar animación
+            png = panel.screenshot(timeout=6000)
+    except Exception as e:
+        log.warning(f"BCh: no pude capturar comprobante: {type(e).__name__}: {e}")
+    finally:
+        # Cerrar panel lateral con Escape (Material side panels lo aceptan).
+        try:
+            page.keyboard.press("Escape")
+            page.wait_for_timeout(300)
+        except Exception:
+            pass
+        # Re-colapsar la fila si quedó expandida (segundo click en '+' la cierra).
+        if expanded:
+            try:
+                plus = row.locator("i.icon-ion-plus").first
+                if plus.is_visible(timeout=500):
+                    plus.click(timeout=2000)
+                    page.wait_for_timeout(200)
+            except Exception:
+                pass
+    return png
+
+
+def _read_current_page(
+    page: Page,
+    capture_screenshots: bool = True,
+    screenshot_predicate: Callable[[dict], bool] | None = None,
+) -> list[dict]:
     """Lee la página visible actual de la tabla bch-table.
 
     BCh usa Angular Material CDK con clases tipo `cdk-column-fechaContable`,
@@ -390,6 +519,14 @@ def _read_current_page(page: Page) -> list[dict]:
 
     Saltamos las filas con clase `table-collapse-row` que son filas vacías de
     animación de detalle expandible.
+
+    Si `capture_screenshots`, por cada movimiento parseado expande el detalle
+    de la fila, captura el panel del comprobante, lo cierra y adjunta el PNG
+    en `mov["screenshot_bytes"]`. El envío a Telegram lo hace `telegram_notify.send_card`.
+
+    Si `screenshot_predicate` está dado, solo captura el screenshot cuando el
+    predicate devuelve True para ese mov (ej. "es nuevo en DB"). Si es None,
+    captura todos (comportamiento legacy).
     """
     rows_loc = page.locator(SEL_TABLE_ROW)
     n = rows_loc.count()
@@ -412,6 +549,10 @@ def _read_current_page(page: Page) -> list[dict]:
             continue
         mov = _parse_row(fecha, descripcion, cargo, abono, saldo)
         if mov:
+            if capture_screenshots:
+                should = True if screenshot_predicate is None else bool(screenshot_predicate(mov))
+                if should:
+                    mov["screenshot_bytes"] = _capture_receipt_screenshot(page, row)
             results.append(mov)
     return results
 
@@ -512,7 +653,10 @@ def _send_diagnostic_screenshot(page: Page, label: str) -> None:
         log.warning(f"Error enviando screenshot diag: {e}")
 
 
-def fetch_movements(page: Page) -> list[dict]:
+def fetch_movements(
+    page: Page,
+    screenshot_predicate: Callable[[dict], bool] | None = None,
+) -> list[dict]:
     # Tras el login, BCh suele mostrar un popup publicitario que tapa el flujo
     # y bloquea la navegación. Lo cerramos antes de cualquier goto.
     log.info("Cerrando popups post-login antes de navegar a movimientos…")
@@ -572,6 +716,34 @@ def fetch_movements(page: Page) -> list[dict]:
             f"BCh nos rebotó a Auth0 al ir a saldos-movimientos (URL: {page.url}). "
             f"La sesión del segundo nivel sigue inválida incluso tras login fresh — "
             f"probable token JWT que requiere step-up auth o navegación click-driven desde el menú."
+        )
+
+    # Defensa anti-bot (2026-05-15): el portal de BCh es una SPA con Module
+    # Federation cargada vía `System.import('./portal-persona-root-config.js')`.
+    # Si Chromium parece automatizado, el bundle se carga pero NO inyecta el
+    # `<app-root>` en `<div id="main"></div>` — el polling de tabla espera 90s
+    # en vano. Aquí abortamos rápido con un mensaje específico si la SPA no
+    # bootea, antes de gastar 90s en un wait estéril.
+    log.info("Esperando que la SPA Angular boote (app-root, hasta 30s)…")
+    try:
+        page.wait_for_function(
+            "() => !!document.querySelector('app-root') || "
+            "!!document.querySelector('app-saldos-movimientos') || "
+            "!!window.ng || !!window.getAllAngularRootElements",
+            timeout=30000,
+        )
+        log.info("BCh: SPA Angular booteó OK.")
+    except PWTimeout:
+        try:
+            body_html = page.evaluate("document.body ? document.body.innerHTML.slice(0, 400) : ''")
+        except Exception:
+            body_html = "<no pude obtener body_html>"
+        log.warning(f"BCh: SPA NO booteó en 30s. body_html (400 chars): {body_html!r}")
+        _send_diagnostic_screenshot(page, "spa-no-bootea")
+        raise ScraperBroken(
+            f"BCh: la SPA Angular no booteó en 30s (URL: {page.url}). "
+            f"Probable detección anti-bot del bundle SystemJS — el shell HTML cargó "
+            f"pero `portal-persona-root-config.js` no inyectó `app-root` en `<div id=\"main\">`."
         )
 
     # La SPA carga async. Esperamos hasta 90s con polling de 10s para loguear
@@ -647,7 +819,7 @@ def fetch_movements(page: Page) -> list[dict]:
     max_pages = 50  # safety guard contra loop infinito si el paginador se rompe
     while page_num <= max_pages:
         log.info(f"Procesando página {page_num} de movimientos BCh…")
-        rows = _read_current_page(page)
+        rows = _read_current_page(page, screenshot_predicate=screenshot_predicate)
         if not rows:
             log.info(f"Página {page_num} sin filas. Cortando.")
             break

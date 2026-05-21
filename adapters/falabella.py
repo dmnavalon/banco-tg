@@ -108,6 +108,7 @@ DASHBOARD_PATTERN = re.compile(
 
 
 def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str] | None = None) -> None:
+    password = (password or "").strip()
     if not re.fullmatch(r"\d{6}", password):
         raise LoginFailed("La clave de internet de Falabella debe ser exactamente 6 dígitos.")
 
@@ -181,7 +182,12 @@ def login(page: Page, rut: str, password: str, otp_provider: Callable[[str], str
 
 
 def _dismiss_popups(page: Page) -> None:
-    """Cierra popups/overlays publicitarios de alta z-index. Itera hasta 3 veces."""
+    """Cierra popups/overlays publicitarios de alta z-index. Itera hasta 3 veces.
+
+    Si tras los 3 intentos sigue habiendo un overlay grande (>30% pantalla),
+    levanta `ScraperBroken` para no avanzar a clicks que pueden caer en
+    el overlay equivocado.
+    """
     for attempt in range(3):
         closed_any = False
 
@@ -224,7 +230,25 @@ def _dismiss_popups(page: Page) -> None:
 
         # Si no hubo popups en este intento, salir del loop
         if not closed_any and not removed:
-            break
+            return
+
+    # Tras 3 intentos: si sigue habiendo overlay grande, abortar.
+    big_overlay = page.evaluate("""
+        () => {
+            const area = window.innerWidth * window.innerHeight;
+            for (const el of document.querySelectorAll('*')) {
+                if (el.tagName === 'BODY' || el.tagName === 'HTML') continue;
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden') continue;
+                const z = parseInt(style.zIndex, 10);
+                const r = el.getBoundingClientRect();
+                if (z > 100 && r.width * r.height > area * 0.30) return true;
+            }
+            return false;
+        }
+    """)
+    if big_overlay:
+        raise ScraperBroken("Popup persistente cubre >30% de la pantalla tras 3 intentos de cierre.")
 
 
 def _select_confirmed_table(page: Page):
@@ -235,6 +259,9 @@ def _select_confirmed_table(page: Page):
       2. "Fecha de compras" / movimientos confirmados — ESTA es la que queremos.
 
     Las identificamos por el texto del primer ``<th>``. Si dice "pendiente", la salta.
+    Prioriza tablas cuyo header contenga "fecha" para evitar elegir tablas
+    accidentales (ej. "Anuladas") con más filas.
+
     Devuelve (table_locator, headers) o (None, []) si no encuentra.
     """
     container = page.locator("app-movements-table")
@@ -242,7 +269,8 @@ def _select_confirmed_table(page: Page):
     if not tables:
         return None, []
 
-    best, max_rows, best_headers = None, -1, []
+    fecha_match, fecha_max_rows, fecha_headers = None, -1, []
+    fallback, fallback_max_rows, fallback_headers = None, -1, []
     for t in tables:
         headers = [h.inner_text().strip() for h in t.locator("thead tr th").all()]
         first_header_lower = (headers[0] if headers else "").lower()
@@ -251,9 +279,14 @@ def _select_confirmed_table(page: Page):
             continue
         n = t.locator("tbody tr").count()
         log.info(f"Tabla candidata (header[0]={headers[0] if headers else '∅'!r}): {n} filas")
-        if n > max_rows:
-            max_rows, best, best_headers = n, t, headers
-    return best, best_headers
+        if "fecha" in first_header_lower:
+            if n > fecha_max_rows:
+                fecha_max_rows, fecha_match, fecha_headers = n, t, headers
+        elif n > fallback_max_rows:
+            fallback_max_rows, fallback, fallback_headers = n, t, headers
+    if fecha_match is not None:
+        return fecha_match, fecha_headers
+    return fallback, fallback_headers
 
 
 def _capture_modal_screenshot(page: Page, row) -> bytes | None:
@@ -305,15 +338,30 @@ def _go_to_next_page(page: Page) -> bool:
         return False
 
 
-def _read_current_page(page: Page, capture_screenshots: bool = True) -> list[dict]:
+def _read_current_page(
+    page: Page,
+    capture_screenshots: bool = True,
+    screenshot_predicate: Callable[[dict], bool] | None = None,
+) -> list[dict]:
     """Lee la página actual de la tabla de movimientos confirmados.
 
     Por cada fila, parsea las celdas y opcionalmente captura un screenshot del
     modal de detalle. Devuelve lista de movimientos (vacía si no hay).
+
+    Si `screenshot_predicate` está dado, solo captura el screenshot cuando el
+    predicate devuelve True para ese mov (ej. "es nuevo en DB"). Si es None,
+    captura todos (comportamiento legacy).
+
+    Levanta `ScraperBroken` si NO encuentra tabla confirmada (distinto de
+    "tabla vacía"): permite distinguir un mes legítimamente sin movimientos
+    de un cambio de HTML del banco.
     """
     table, headers = _select_confirmed_table(page)
     if table is None:
-        return []
+        raise ScraperBroken(
+            "No se encontró tabla de movimientos confirmados en Falabella. "
+            "Probable cambio de HTML del banco o solo hay pendientes."
+        )
 
     rows = table.locator("tbody tr")
     n_rows = rows.count()
@@ -329,12 +377,17 @@ def _read_current_page(page: Page, capture_screenshots: bool = True) -> list[dic
         if not mov:
             continue
         if capture_screenshots:
-            mov["screenshot_bytes"] = _capture_modal_screenshot(page, row)
+            should = True if screenshot_predicate is None else bool(screenshot_predicate(mov))
+            if should:
+                mov["screenshot_bytes"] = _capture_modal_screenshot(page, row)
         results.append(mov)
     return results
 
 
-def fetch_movements(page: Page) -> list[dict]:
+def fetch_movements(
+    page: Page,
+    screenshot_predicate: Callable[[dict], bool] | None = None,
+) -> list[dict]:
     log.info("Esperando dashboard Falabella…")
     page.wait_for_timeout(5000)
 
@@ -377,7 +430,11 @@ def fetch_movements(page: Page) -> list[dict]:
     max_pages = 50  # safety guard contra loop infinito si la paginación se rompe
     while page_num <= max_pages:
         log.info(f"Procesando página {page_num} de movimientos…")
-        rows = _read_current_page(page, capture_screenshots=True)
+        rows = _read_current_page(
+            page,
+            capture_screenshots=True,
+            screenshot_predicate=screenshot_predicate,
+        )
         if not rows:
             log.info(f"Página {page_num} vacía. Cortando.")
             break
@@ -387,6 +444,13 @@ def fetch_movements(page: Page) -> list[dict]:
             log.info(f"Llegué a la última página ({page_num}). Total: {len(movements)} movimientos.")
             break
         page_num += 1
+    else:
+        # Llegamos a max_pages y _go_to_next_page seguía retornando True.
+        # Probablemente hay más movimientos que no estamos scrapeando.
+        log.warning(
+            f"Falabella: alcanzado tope de paginación ({max_pages} páginas, {len(movements)} movs). "
+            f"Pueden quedar movimientos sin scrapear."
+        )
 
     log.info(f"Falabella: {len(movements)} movimientos totales.")
     return movements
@@ -437,13 +501,13 @@ def _parse_row(cells: list[str]) -> dict | None:
         if cuotas_total > 1 and cuota_monto_raw:
             cuota_monto = parse_clp_amount(cuota_monto_raw)
 
-    desc = descripcion
-    if cuotas_raw and cuotas_raw != "/":
-        desc = f"{desc} ({cuotas_raw})"
-
+    # Descripción SIN sufijo "(N/M)": las cuotas viajan en cuotas_actual/total
+    # como campos separados. Incluir el sufijo en la descripción rompe la
+    # estabilidad del hash entre meses (ej. "(2/12)" → "(3/12)" generaría dos
+    # movimientos para la misma compra original).
     return {
         "date": parse_chilean_date(fecha),
-        "description": desc,
+        "description": descripcion,
         "amount": -abs(monto_total),
         "movement_type": "cargo",
         "account": "falabella",

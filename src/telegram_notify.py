@@ -489,9 +489,11 @@ def _send_one_card(mov: dict, target: str) -> bool:
     screenshot = mov.get("screenshot_bytes")
     file_id = mov.get("tg_photo_file_id")
 
-    if not screenshot and not file_id:
-        from . import screenshot_storage
-        screenshot = screenshot_storage.download(mov_id)
+    # Antes había fallback a screenshot_storage.download(mov_id) acá. Removido
+    # 2026-05-15: el proyecto Firebase no tiene Storage habilitado y no
+    # queremos pasar a Blaze. La persistencia depende exclusivamente de
+    # `tg_photo_file_id` (Firestore). Si no hay ninguno de los dos, el envío
+    # cae al fallback de texto plano más abajo.
 
     base_url = f"{TG_API}/bot{_bot_token()}"
 
@@ -559,6 +561,14 @@ def send_movement_cards(movements: Sequence[dict]) -> bool:
     first_page = list(movements[:BATCH_PAGE_SIZE])
     overflow = list(movements[BATCH_PAGE_SIZE:])
 
+    # Persistir el payload ANTES de enviar las tarjetas. Si Diego responde
+    # «1 ok» antes de que terminemos de enviar todas, feedback.apply ya tiene
+    # el batch correcto. Antes el payload se persistía después del loop, lo
+    # que dejaba a feedback.apply leyendo el batch ANTERIOR.
+    expected_ids = [m["id"] for m in first_page]
+    db.set_batch_ids(expected_ids)
+    db.set_config("last_batch_payload", ",".join(expected_ids))
+
     ids_sent: list[str] = []
     for mov in first_page:
         if _send_one_card(mov, target):
@@ -567,8 +577,10 @@ def send_movement_cards(movements: Sequence[dict]) -> bool:
             log.error(f"No se pudo enviar tarjeta para {mov.get('id')}")
 
     if ids_sent:
-        # Estos IDs son los visibles AHORA — feedback.apply los usa para "1 ok", "2 supermercado", etc.
-        db.set_batch_ids(ids_sent)
+        # Si alguna tarjeta falló al enviarse, ajustamos el batch al subset real.
+        if ids_sent != expected_ids:
+            db.set_batch_ids(ids_sent)
+            db.set_config("last_batch_payload", ",".join(ids_sent))
         db.mark_notified(ids_sent)
         db.record_telegram_log(
             direction="out",
@@ -577,8 +589,10 @@ def send_movement_cards(movements: Sequence[dict]) -> bool:
             text=f"{len(ids_sent)}/{total} tarjetas enviadas",
             payload=",".join(ids_sent),
         )
+    else:
+        # Ninguna tarjeta se envió: limpiar el payload pre-persistido.
+        db.set_config("last_batch_payload", "")
 
-    # Persistir los IDs restantes para que /next los recupere. Solo escribimos
     # cuando hay overflow real — NO limpiamos en el else, porque esta función
     # también se reusaba para reenviar un solo movimiento tras correcciones y
     # cancelaciones, lo que borraba la cola legítima del cron. Ahora los resends
@@ -622,6 +636,12 @@ def send_next_batch_page() -> str:
         db.set_config("last_batch_remaining", "")
         return "Los pendientes en cola ya no existen en la base. Cola limpiada."
 
+    # Persistir el payload ANTES de enviar (mismo patrón que send_movement_cards
+    # para evitar race condition con feedback.apply).
+    expected_ids = [m["id"] for m in movs]
+    db.set_batch_ids(expected_ids)
+    db.set_config("last_batch_payload", ",".join(expected_ids))
+
     target = _chat_id()
     ids_sent: list[str] = []
     for mov in movs:
@@ -629,8 +649,12 @@ def send_next_batch_page() -> str:
             ids_sent.append(mov["id"])
 
     if ids_sent:
-        db.set_batch_ids(ids_sent)
+        if ids_sent != expected_ids:
+            db.set_batch_ids(ids_sent)
+            db.set_config("last_batch_payload", ",".join(ids_sent))
         db.mark_notified(ids_sent)
+    else:
+        db.set_config("last_batch_payload", "")
 
     db.set_config("last_batch_remaining", ",".join(rest))
 

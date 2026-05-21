@@ -9,6 +9,13 @@ class LoginFailed(Exception):
     pass
 
 
+class CredentialsRejected(LoginFailed):
+    """El banco rechazó RUT/clave explícitamente. No reintentar sin nuevo /cred:
+    cada intento adicional con la misma credencial mala arrima la cuenta al
+    bloqueo. `run_daily` captura este caso para pausar el banco en Firestore."""
+    pass
+
+
 class TwoFARequired(Exception):
     pass
 
