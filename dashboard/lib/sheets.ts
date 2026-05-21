@@ -51,6 +51,13 @@ function getSheetsClient(): sheets_v4.Sheets {
   return sheetsClient;
 }
 
+class SheetMissingError extends Error {
+  constructor(public range: string, public httpStatus: number) {
+    super(`Sheet/range no disponible (${httpStatus}): ${range}`);
+    this.name = "SheetMissingError";
+  }
+}
+
 async function readRange(range: string): Promise<string[][]> {
   const sheets = getSheetsClient();
   try {
@@ -64,6 +71,22 @@ async function readRange(range: string): Promise<string[][]> {
   } catch (err) {
     const status = (err as { code?: number; status?: number }).code ?? (err as { status?: number }).status;
     if (status === 400 || status === 404) {
+      // Antes se silenciaba (`return []`), ocultando hojas borradas/renombradas.
+      // Ahora se propaga como SheetMissingError para que `loadDashboardData`
+      // pueda agregarlo a `warnings` y el caller distinga "hoja vacía" de
+      // "hoja desaparecida".
+      throw new SheetMissingError(range, status ?? 0);
+    }
+    throw err;
+  }
+}
+
+async function readRangeOrEmpty(range: string, warnings: string[]): Promise<string[][]> {
+  try {
+    return await readRange(range);
+  } catch (err) {
+    if (err instanceof SheetMissingError) {
+      warnings.push(`Rango "${range}" no encontrado (HTTP ${err.httpStatus}). Verifica que la hoja exista en el spreadsheet.`);
       return [];
     }
     throw err;
@@ -86,96 +109,153 @@ function asTipoMovimiento(s: string): TipoMovimiento {
   return valid.includes(s as TipoMovimiento) ? (s as TipoMovimiento) : "GastoReal";
 }
 
-async function readMovimientos(taxonomia: TaxonomiaRow[]): Promise<Movimiento[]> {
-  // Header oficial 24 col post-migración 2026-05-08:
-  //  A=0  Fecha           M=12 Subcategoría        S=18 Esencial
-  //  B=1  Día             N=13 Cuota actual        T=19 Fijo
-  //  C=2  Mes             O=14 Cuotas total        U=20 Recurrente
-  //  D=3  Año             P=15 Cuota a pagar       V=21 Extraordinario
-  //  E=4  Día Semana      Q=16 Moneda              W=22 Excluido
-  //  F=5  Banco           R=17 MontoCLP            X=23 Notas
-  //  G=6  Persona
-  //  H=7  Descripción
-  //  I=8  Monto
-  //  J=9  Tipo
-  //  K=10 Saldo
-  //  L=11 Categoría
-  const rows = await readRange("Movimientos!A2:X");
+// Columnas requeridas en la hoja "Movimientos". Si falta alguna, se agrega
+// warning y se usan defaults seguros (0 / "" según corresponda).
+const REQUIRED_MOV_COLS = [
+  "Fecha", "Banco", "Persona", "Descripción", "Monto", "Tipo", "Saldo",
+  "Categoría", "Subcategoría",
+  "Cuota actual", "Cuotas total", "Cuota a pagar",
+  "Moneda", "MontoCLP", "Esencial", "Fijo",
+  "Recurrente", "Extraordinario", "Excluido", "Notas",
+] as const;
+
+async function readMovimientos(taxonomia: TaxonomiaRow[], warnings: string[]): Promise<Movimiento[]> {
+  // Lee header dinámicamente para no atar el dashboard a un orden de columnas
+  // específico. Si el sheet se reordena (ej. extend_sheet_header.py inserta
+  // columnas), el dashboard sigue funcionando mientras los nombres existan.
+  let headerRow: string[][] = [];
+  try {
+    headerRow = await readRange("Movimientos!1:1");
+  } catch (err) {
+    if (err instanceof SheetMissingError) {
+      warnings.push(`Hoja "Movimientos" no encontrada (HTTP ${err.httpStatus}). Dashboard sin datos.`);
+      return [];
+    }
+    throw err;
+  }
+  const header = headerRow[0] || [];
+  if (header.length === 0) {
+    warnings.push("Hoja 'Movimientos' sin header. Dashboard sin datos.");
+    return [];
+  }
+  const colIdx = new Map<string, number>();
+  header.forEach((name, i) => {
+    const trimmed = (name || "").trim();
+    if (trimmed) colIdx.set(trimmed, i);
+  });
+  for (const required of REQUIRED_MOV_COLS) {
+    if (!colIdx.has(required)) {
+      warnings.push(`Columna "${required}" no encontrada en hoja Movimientos. Se usará default.`);
+    }
+  }
+  const get = (r: string[], name: string): string => {
+    const i = colIdx.get(name);
+    if (i === undefined) return "";
+    const v = r[i];
+    return v === undefined || v === null ? "" : String(v);
+  };
+
+  const lastCol = header.length;
+  const lastColLetter = colNumberToLetter(lastCol);
+  const rows = await readRangeOrEmpty(`Movimientos!A2:${lastColLetter}`, warnings);
   const taxIndex = new Map<string, TaxonomiaRow>();
   for (const t of taxonomia) {
     taxIndex.set(t.categoria, t);
   }
 
-  return rows
-    .filter((r) => r && r.length > 0 && r[0])
-    .map((r, i): Movimiento => {
-      const fechaISO = String(r[0] || "");
-      const fecha = parseChileanDate(fechaISO) ?? new Date(0);
-      const categoria = String(r[11] || "").trim();
-      const subcategoria = String(r[12] || "").trim();
+  let invalidDateCount = 0;
+  const result: Movimiento[] = [];
+  rows.filter((r) => r && r.length > 0 && r[0]).forEach((r, i) => {
+    const fechaRaw = get(r, "Fecha");
+    const fechaParsed = parseChileanDate(fechaRaw);
+    if (fechaParsed === null) {
+      invalidDateCount += 1;
+      return;
+    }
+    const fecha = fechaParsed;
+    // fechaISO siempre en formato DD/MM/YYYY para consistencia visual,
+    // independiente de cómo viene del sheet (número serial o string).
+    const dd = String(fecha.getUTCDate()).padStart(2, "0");
+    const mm = String(fecha.getUTCMonth() + 1).padStart(2, "0");
+    const yyyy = fecha.getUTCFullYear();
+    const fechaISO = `${dd}/${mm}/${yyyy}`;
+    const categoria = String(get(r, "Categoría") || "").trim();
+    const subcategoria = String(get(r, "Subcategoría") || "").trim();
 
-      // Cuotas
-      const cuotaActualRaw = r[13];
-      const cuotasTotalRaw = r[14];
-      const cuotaAPagarRaw = r[15];
-      const cuotaActual = cuotaActualRaw && String(cuotaActualRaw).trim() !== "" ? parseNumber(cuotaActualRaw) : null;
-      const cuotasTotal = cuotasTotalRaw && String(cuotasTotalRaw).trim() !== "" ? parseNumber(cuotasTotalRaw) : null;
-      const cuotaAPagar = cuotaAPagarRaw && String(cuotaAPagarRaw).trim() !== "" ? parseNumber(cuotaAPagarRaw) : null;
+    const cuotaActualRaw = get(r, "Cuota actual");
+    const cuotasTotalRaw = get(r, "Cuotas total");
+    const cuotaAPagarRaw = get(r, "Cuota a pagar");
+    const cuotaActual = cuotaActualRaw.trim() !== "" ? parseNumber(cuotaActualRaw) : null;
+    const cuotasTotal = cuotasTotalRaw.trim() !== "" ? parseNumber(cuotasTotalRaw) : null;
+    const cuotaAPagar = cuotaAPagarRaw.trim() !== "" ? parseNumber(cuotaAPagarRaw) : null;
 
-      const moneda = asMoneda(String(r[16] || "CLP"));
-      const monto = parseNumber(r[8]);
-      const montoCLP = parseNumber(r[17]) || monto;
-      const tipoStr = String(r[9] || "");
+    const moneda = asMoneda(String(get(r, "Moneda") || "CLP"));
+    const monto = parseNumber(get(r, "Monto"));
+    const montoCLP = parseNumber(get(r, "MontoCLP")) || monto;
+    const tipoStr = String(get(r, "Tipo") || "");
 
-      // Monto efectivo del mes:
-      //   Si Cuotas total > 1 → cuotaAPagar (si existe) o montoCLP/cuotasTotal (aproximación).
-      //   Si no → montoCLP.
-      const montoMesCLP =
-        cuotasTotal && cuotasTotal > 1
-          ? cuotaAPagar !== null
-            ? cuotaAPagar
-            : montoCLP / cuotasTotal
-          : montoCLP;
+    const montoMesCLP =
+      cuotasTotal && cuotasTotal > 1
+        ? cuotaAPagar !== null
+          ? cuotaAPagar
+          : montoCLP / cuotasTotal
+        : montoCLP;
 
-      const tax = taxIndex.get(categoria);
-      const esencial = parseBool(r[18]) || (tax?.esencial ?? false);
-      const fijo = parseBool(r[19]) || (tax?.fijo ?? false);
-      const recurrente = parseBool(r[20]);
-      const extraordinario = parseBool(r[21]);
-      const excluido = parseBool(r[22]);
-      const tipoMovimiento = tax?.tipoMovimiento ?? (tipoStr === "Abono" ? "Ingreso" : "GastoReal");
+    const tax = taxIndex.get(categoria);
+    const esencial = parseBool(get(r, "Esencial")) || (tax?.esencial ?? false);
+    const fijo = parseBool(get(r, "Fijo")) || (tax?.fijo ?? false);
+    const recurrente = parseBool(get(r, "Recurrente"));
+    const extraordinario = parseBool(get(r, "Extraordinario"));
+    const excluido = parseBool(get(r, "Excluido"));
+    const tipoMovimiento = tax?.tipoMovimiento ?? (tipoStr === "Abono" ? "Ingreso" : "GastoReal");
+    const saldoRaw = get(r, "Saldo");
 
-      return {
-        idx: i,
-        fecha,
-        fechaISO,
-        banco: String(r[5] || ""),
-        persona: String(r[6] || ""),
-        descripcion: String(r[7] || ""),
-        monto,
-        montoCLP,
-        montoMesCLP,
-        tipo: (tipoStr === "Abono" || tipoStr === "Cargo") ? tipoStr : "",
-        saldo: r[10] ? parseNumber(r[10]) : null,
-        categoria,
-        subcategoria,
-        cuotaActual,
-        cuotasTotal,
-        cuotaAPagar,
-        moneda,
-        esencial,
-        fijo,
-        recurrente,
-        extraordinario,
-        excluido,
-        notas: String(r[23] || ""),
-        tipoMovimiento,
-      };
+    result.push({
+      idx: i,
+      fecha,
+      fechaISO,
+      banco: String(get(r, "Banco") || ""),
+      persona: String(get(r, "Persona") || ""),
+      descripcion: String(get(r, "Descripción") || ""),
+      monto,
+      montoCLP,
+      montoMesCLP,
+      tipo: (tipoStr === "Abono" || tipoStr === "Cargo") ? tipoStr : "",
+      saldo: saldoRaw.trim() !== "" ? parseNumber(saldoRaw) : null,
+      categoria,
+      subcategoria,
+      cuotaActual,
+      cuotasTotal,
+      cuotaAPagar,
+      moneda,
+      esencial,
+      fijo,
+      recurrente,
+      extraordinario,
+      excluido,
+      notas: String(get(r, "Notas") || ""),
+      tipoMovimiento,
     });
+  });
+  if (invalidDateCount > 0) {
+    warnings.push(`${invalidDateCount} movimiento(s) descartados por fecha inválida en columna A.`);
+  }
+  return result;
 }
 
-async function readTaxonomia(): Promise<TaxonomiaRow[]> {
-  const rows = await readRange("TaxonomíaExtendida!A2:F");
+function colNumberToLetter(n: number): string {
+  let result = "";
+  let num = n;
+  while (num > 0) {
+    const rem = (num - 1) % 26;
+    result = String.fromCharCode(65 + rem) + result;
+    num = Math.floor((num - 1) / 26);
+  }
+  return result;
+}
+
+async function readTaxonomia(warnings: string[]): Promise<TaxonomiaRow[]> {
+  const rows = await readRangeOrEmpty("TaxonomíaExtendida!A2:F", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): TaxonomiaRow => ({
@@ -188,8 +268,8 @@ async function readTaxonomia(): Promise<TaxonomiaRow[]> {
     }));
 }
 
-async function readPresupuesto(): Promise<PresupuestoRow[]> {
-  const rows = await readRange("Presupuesto!A2:F");
+async function readPresupuesto(warnings: string[]): Promise<PresupuestoRow[]> {
+  const rows = await readRangeOrEmpty("Presupuesto!A2:F", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): PresupuestoRow => ({
@@ -202,8 +282,8 @@ async function readPresupuesto(): Promise<PresupuestoRow[]> {
     }));
 }
 
-async function readTipoCambio(): Promise<TipoCambioRow[]> {
-  const rows = await readRange("TipoCambio!A2:C");
+async function readTipoCambio(warnings: string[]): Promise<TipoCambioRow[]> {
+  const rows = await readRangeOrEmpty("TipoCambio!A2:C", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): TipoCambioRow => ({
@@ -213,8 +293,8 @@ async function readTipoCambio(): Promise<TipoCambioRow[]> {
     }));
 }
 
-async function readDeudasMaestro(): Promise<DeudaMaestro[]> {
-  const rows = await readRange("Deudas_Maestro!A2:J");
+async function readDeudasMaestro(warnings: string[]): Promise<DeudaMaestro[]> {
+  const rows = await readRangeOrEmpty("Deudas_Maestro!A2:J", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): DeudaMaestro => ({
@@ -231,8 +311,8 @@ async function readDeudasMaestro(): Promise<DeudaMaestro[]> {
     }));
 }
 
-async function readDeudasSnapshot(): Promise<DeudaSnapshot[]> {
-  const rows = await readRange("Deudas_Snapshot!A2:F");
+async function readDeudasSnapshot(warnings: string[]): Promise<DeudaSnapshot[]> {
+  const rows = await readRangeOrEmpty("Deudas_Snapshot!A2:F", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): DeudaSnapshot => ({
@@ -245,8 +325,8 @@ async function readDeudasSnapshot(): Promise<DeudaSnapshot[]> {
     }));
 }
 
-async function readInversionesMaestro(): Promise<InversionMaestro[]> {
-  const rows = await readRange("Inversiones_Maestro!A2:J");
+async function readInversionesMaestro(warnings: string[]): Promise<InversionMaestro[]> {
+  const rows = await readRangeOrEmpty("Inversiones_Maestro!A2:J", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): InversionMaestro => {
@@ -266,8 +346,8 @@ async function readInversionesMaestro(): Promise<InversionMaestro[]> {
     });
 }
 
-async function readInversionesSnapshot(): Promise<InversionSnapshot[]> {
-  const rows = await readRange("Inversiones_Snapshot!A2:H");
+async function readInversionesSnapshot(warnings: string[]): Promise<InversionSnapshot[]> {
+  const rows = await readRangeOrEmpty("Inversiones_Snapshot!A2:H", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): InversionSnapshot => ({
@@ -282,8 +362,8 @@ async function readInversionesSnapshot(): Promise<InversionSnapshot[]> {
     }));
 }
 
-async function readInversionesObjetivo(): Promise<InversionObjetivo[]> {
-  const rows = await readRange("InversionesObjetivo!A2:C");
+async function readInversionesObjetivo(warnings: string[]): Promise<InversionObjetivo[]> {
+  const rows = await readRangeOrEmpty("InversionesObjetivo!A2:C", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): InversionObjetivo => ({
@@ -293,8 +373,8 @@ async function readInversionesObjetivo(): Promise<InversionObjetivo[]> {
     }));
 }
 
-async function readActivosIliquidos(): Promise<ActivoIliquido[]> {
-  const rows = await readRange("ActivosIlíquidos!A2:F");
+async function readActivosIliquidos(warnings: string[]): Promise<ActivoIliquido[]> {
+  const rows = await readRangeOrEmpty("ActivosIlíquidos!A2:F", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): ActivoIliquido => ({
@@ -307,8 +387,8 @@ async function readActivosIliquidos(): Promise<ActivoIliquido[]> {
     }));
 }
 
-async function readPatrimonio(): Promise<PatrimonioRow[]> {
-  const rows = await readRange("Patrimonio!A2:H");
+async function readPatrimonio(warnings: string[]): Promise<PatrimonioRow[]> {
+  const rows = await readRangeOrEmpty("Patrimonio!A2:H", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): PatrimonioRow => ({
@@ -323,8 +403,8 @@ async function readPatrimonio(): Promise<PatrimonioRow[]> {
     }));
 }
 
-async function readMetas(): Promise<MetaRow[]> {
-  const rows = await readRange("Metas!A2:F");
+async function readMetas(warnings: string[]): Promise<MetaRow[]> {
+  const rows = await readRangeOrEmpty("Metas!A2:F", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): MetaRow => ({
@@ -337,8 +417,8 @@ async function readMetas(): Promise<MetaRow[]> {
     }));
 }
 
-async function readIngresosEsperados(): Promise<IngresoEsperado[]> {
-  const rows = await readRange("IngresosEsperados!A2:E");
+async function readIngresosEsperados(warnings: string[]): Promise<IngresoEsperado[]> {
+  const rows = await readRangeOrEmpty("IngresosEsperados!A2:E", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): IngresoEsperado => ({
@@ -350,8 +430,8 @@ async function readIngresosEsperados(): Promise<IngresoEsperado[]> {
     }));
 }
 
-async function readEgresosEsperados(): Promise<EgresoEsperado[]> {
-  const rows = await readRange("EgresosEsperados!A2:F");
+async function readEgresosEsperados(warnings: string[]): Promise<EgresoEsperado[]> {
+  const rows = await readRangeOrEmpty("EgresosEsperados!A2:F", warnings);
   return rows
     .filter((r) => r && r[0])
     .map((r): EgresoEsperado => ({
@@ -367,7 +447,7 @@ async function readEgresosEsperados(): Promise<EgresoEsperado[]> {
 export async function loadDashboardData(): Promise<DashboardData> {
   const warnings: string[] = [];
 
-  const taxonomia = await readTaxonomia();
+  const taxonomia = await readTaxonomia(warnings);
   if (taxonomia.length === 0) {
     warnings.push("TaxonomíaExtendida vacía. Las clasificaciones esencial/fijo/tipo de movimiento usarán defaults conservadores.");
   }
@@ -387,19 +467,19 @@ export async function loadDashboardData(): Promise<DashboardData> {
     ingresosEsperados,
     egresosEsperados,
   ] = await Promise.all([
-    readMovimientos(taxonomia),
-    readPresupuesto(),
-    readTipoCambio(),
-    readDeudasMaestro(),
-    readDeudasSnapshot(),
-    readInversionesMaestro(),
-    readInversionesSnapshot(),
-    readInversionesObjetivo(),
-    readActivosIliquidos(),
-    readPatrimonio(),
-    readMetas(),
-    readIngresosEsperados(),
-    readEgresosEsperados(),
+    readMovimientos(taxonomia, warnings),
+    readPresupuesto(warnings),
+    readTipoCambio(warnings),
+    readDeudasMaestro(warnings),
+    readDeudasSnapshot(warnings),
+    readInversionesMaestro(warnings),
+    readInversionesSnapshot(warnings),
+    readInversionesObjetivo(warnings),
+    readActivosIliquidos(warnings),
+    readPatrimonio(warnings),
+    readMetas(warnings),
+    readIngresosEsperados(warnings),
+    readEgresosEsperados(warnings),
   ]);
 
   return {

@@ -541,6 +541,28 @@ def list_credentials() -> list[str]:
     return sorted(d.id for d in _db().collection("credentials").get())
 
 
+def list_credential_docs() -> list[dict[str, Any]]:
+    """Lista todos los docs de `credentials` con sus campos (no solo IDs).
+    Usado por `secrets_store.list_configured()` para filtrar los bancos
+    marcados como inválidos por el banco (campo `invalid_since`)."""
+    docs = []
+    for d in _db().collection("credentials").get():
+        data = d.to_dict() or {}
+        data["bank"] = d.id
+        docs.append(data)
+    return sorted(docs, key=lambda x: x["bank"])
+
+
+def mark_credential_invalid(bank: str, reason: str) -> None:
+    """Marca la credencial como rechazada por el banco. El doc se actualiza
+    parcialmente para no tocar el blob cifrado: el siguiente `set_credential_blob`
+    (vía /cred) pisa el doc completo y limpia el flag automáticamente."""
+    _db().collection("credentials").document(bank.lower()).update({
+        "invalid_since": _now(),
+        "invalid_reason": (reason or "")[:500],
+    })
+
+
 # ── wizard_state ───────────────────────────────────────────────────────────
 
 def get_wizard_state(chat_id: str) -> dict[str, Any] | None:

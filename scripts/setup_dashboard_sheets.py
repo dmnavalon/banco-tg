@@ -93,7 +93,15 @@ def _client() -> gspread.Client:
 
 
 def setup_taxonomia(sh: gspread.Spreadsheet) -> None:
-    """Crea/sobrescribe TaxonomíaExtendida con defaults + categorías detectadas en data real."""
+    """Pobla TaxonomíaExtendida MERGEANDO defaults con filas manuales del usuario.
+
+    Si la pestaña no existe → crea con defaults.
+    Si existe → preserva toda fila cuya (Categoría, Subcategoría) ya esté presente
+    (incluso si los defaults dicen otra cosa); agrega solo las filas faltantes.
+
+    Antes el script hacía `ws.clear()` y reescribía, destruyendo edits manuales
+    (ej. usuario marca "Niños/Ropa niños" como Esencial=TRUE).
+    """
     mov = sh.worksheet("Movimientos")
     rows = mov.get_all_values()
     cats_reales: set[str] = set()
@@ -111,21 +119,41 @@ def setup_taxonomia(sh: gspread.Spreadsheet) -> None:
     if faltantes:
         print(f"  → categorías sin defaults oficiales (se agregan conservadores): {faltantes}")
 
+    default_rows = [tuple(t) for t in TAXONOMIA_DEFAULTS] + [tuple(t) for t in extra_rows]
+
     try:
         ws = sh.worksheet("TaxonomíaExtendida")
-        print("  → pestaña TaxonomíaExtendida ya existe — se sobrescribe")
+        existing = ws.get_all_values()
+        # Indexar filas existentes por (categoría, subcategoría) — preservamos
+        # cualquier customización del usuario.
+        existing_keys: set[tuple[str, str]] = set()
+        existing_data_rows: list[list[str]] = []
+        for r in existing[1:] if existing else []:
+            if not r or not (r[0] or "").strip():
+                continue
+            cat = (r[0] or "").strip()
+            sub = (r[1] or "").strip() if len(r) > 1 else ""
+            existing_keys.add((cat, sub))
+            existing_data_rows.append(r + [""] * (6 - len(r)))
+        new_rows = [list(t) for t in default_rows if (t[0], t[1]) not in existing_keys]
+        if not existing or existing[0] != TAXONOMIA_HEADER:
+            # Header faltante o mal: lo escribimos sin tocar las filas de data.
+            ws.update("A1", [TAXONOMIA_HEADER], value_input_option="USER_ENTERED")
+        if new_rows:
+            # Append al final, sin tocar filas existentes.
+            start_row = len(existing_data_rows) + 2
+            ws.update(f"A{start_row}", new_rows, value_input_option="USER_ENTERED")
+            print(f"  ✓ TaxonomíaExtendida: agregadas {len(new_rows)} filas faltantes (preservadas {len(existing_data_rows)} existentes)")
+        else:
+            print(f"  → TaxonomíaExtendida ya completa ({len(existing_data_rows)} filas) — no se modificó")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="TaxonomíaExtendida", rows=200, cols=10)
-        print("  → pestaña TaxonomíaExtendida creada")
+        body = [list(t) for t in default_rows]
+        ws.update("A1", [TAXONOMIA_HEADER] + body, value_input_option="USER_ENTERED")
+        print(f"  ✓ TaxonomíaExtendida creada con {len(body)} filas")
 
-    body = [list(t) for t in TAXONOMIA_DEFAULTS] + [list(t) for t in extra_rows]
-    ws.clear()
-    ws.update("A1", [TAXONOMIA_HEADER] + body, value_input_option="USER_ENTERED")
-
-    # Formato: header en negrita, freeze fila 1
     ws.format("A1:F1", {"textFormat": {"bold": True}})
     ws.freeze(rows=1)
-    print(f"  ✓ TaxonomíaExtendida poblada: {len(body)} filas")
 
 
 def extend_movimientos(sh: gspread.Spreadsheet) -> None:

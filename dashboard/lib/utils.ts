@@ -40,21 +40,38 @@ export function formatMonths(n: number | null | undefined): string {
 }
 
 export function monthKey(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  // Usa UTC para evitar que la TZ del runtime (Vercel = US) desplace fechas
+  // de borde de mes al mes anterior. Asume que las fechas se construyen
+  // con `parseChileanDate`, que usa Date.UTC.
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
-export function parseChileanDate(s: string): Date | null {
-  if (!s) return null;
-  // formats: DD/MM/YYYY, YYYY-MM-DD, or already Date
-  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+export function parseChileanDate(s: string | number | null | undefined): Date | null {
+  if (s === null || s === undefined || s === "") return null;
+  const asStr = typeof s === "number" ? String(s) : String(s).trim();
+  if (!asStr) return null;
+  // Construir las fechas en UTC para que `getUTCMonth/Year` sean estables
+  // independiente de la TZ del runtime. El proyecto opera en CLT pero el
+  // dashboard puede correr en US (Vercel) — usar UTC evita drift.
+
+  // Google Sheets / Excel serial date — entero positivo ~20000..80000 (1954..2119).
+  // Cuando la API responde con valueRenderOption=UNFORMATTED_VALUE, las celdas
+  // formateadas como fecha vuelven como números (días desde 1899-12-30).
+  if (/^\d+(\.\d+)?$/.test(asStr)) {
+    const serial = Number(asStr);
+    if (serial > 20000 && serial < 80000) {
+      return new Date(Date.UTC(1899, 11, 30) + serial * 86400000);
+    }
+  }
+  const m = asStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
   if (m) {
-    return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]));
+    return new Date(Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1])));
   }
-  const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  const iso = asStr.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (iso) {
-    return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    return new Date(Date.UTC(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])));
   }
-  const t = Date.parse(s);
+  const t = Date.parse(asStr);
   if (!Number.isNaN(t)) return new Date(t);
   return null;
 }

@@ -9,7 +9,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env", override=True)
 
 
 def normalize(s: str | None) -> str:
@@ -19,15 +19,26 @@ def normalize(s: str | None) -> str:
     return re.sub(r"\s+", " ", s).strip().upper()
 
 
-def movement_id(date_iso: str, amount: float, description: str, bank: str, account: str | None) -> str:
-    key = "|".join([
+def movement_id(
+    date_iso: str,
+    amount: float,
+    description: str,
+    bank: str,
+    account: str | None,
+    dup_idx: int = 0,
+) -> str:
+    parts = [
         date_iso,
         f"{amount:.2f}",
         normalize(description),
         normalize(bank),
         normalize(account or ""),
-    ])
-    return hashlib.sha1(key.encode()).hexdigest()[:16]
+    ]
+    # dup_idx==0 conserva el hash histórico (back-compat). >0 desambigua compras
+    # idénticas el mismo día (ej. dos cafés del mismo monto, hora distinta).
+    if dup_idx > 0:
+        parts.append(f"dup{dup_idx}")
+    return hashlib.sha1("|".join(parts).encode()).hexdigest()[:16]
 
 
 def mask(s: str | None, keep: int = 4) -> str:
@@ -51,10 +62,23 @@ def parse_clp_amount(raw: str) -> float | None:
     negative = cleaned.startswith("-") or cleaned.endswith("-")
     cleaned = cleaned.lstrip("-").rstrip("-")
     cleaned = cleaned.lstrip("$")
-    cleaned = cleaned.replace(".", "")
-    cleaned = cleaned.replace(",", ".")
     if not cleaned:
         return None
+    # Formato CL esperado: miles con `.`, decimal con `,` (ej. `1.234.567,89`).
+    # Si el último separador es `,` → es el decimal (CL).
+    # Si es `.` con 1-2 dígitos a la derecha y solo hay un `.` → ambigüo
+    # (US decimal o CL miles). Logueo y asumo CL (miles).
+    last_comma = cleaned.rfind(",")
+    last_dot = cleaned.rfind(".")
+    if last_comma > last_dot:
+        cleaned = cleaned.replace(".", "").replace(",", ".")
+    else:
+        if last_dot != -1 and len(cleaned) - last_dot - 1 in (1, 2) and cleaned.count(".") == 1:
+            import logging
+            logging.getLogger("utils").warning(
+                "parse_clp_amount: input ambigüo %r — asumo formato CL (miles).", raw
+            )
+        cleaned = cleaned.replace(".", "").replace(",", "")
     try:
         num = float(cleaned)
     except ValueError:
@@ -71,7 +95,11 @@ def parse_chilean_date(raw: str) -> str:
         return cleaned
     day, month, year = m.group(1), m.group(2), m.group(3)
     if len(year) == 2:
-        year = "20" + year
+        # Heurística: años hasta 5 años en el futuro son 20XX, lo demás 19XX.
+        # Evita interpretar "01/01/95" como 2095 cuando es 1995.
+        from datetime import datetime
+        current_yy = datetime.now().year % 100
+        year = "20" + year if int(year) <= current_yy + 5 else "19" + year
     return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
 
 

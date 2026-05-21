@@ -1,35 +1,36 @@
+"""Screenshot storage — DESACTIVADO desde 2026-05-15.
+
+El proyecto Firebase está en plan Spark (sin tarjeta), así que no podemos
+habilitar Cloud Storage. Las fotos se persisten vía `tg_photo_file_id` que se
+guarda automáticamente en Firestore cuando `telegram_notify.send_card` envía
+la foto a TG. Los `file_id` de Telegram no expiran y permiten reenviar la foto
+sin re-uploading.
+
+Este módulo queda como no-op por compatibilidad con callers existentes
+(`services/movements.py` lo usa para limpiar fotos al borrar un mov).
+
+Si en el futuro se habilita Storage (Blaze o equivalente), restaurar las
+implementaciones reales y volver a llamarlo desde `run_daily.py` y
+`telegram_notify.py`.
+"""
 from __future__ import annotations
 
-from firebase_admin import storage
-
-from . import db
 from .utils import get_logger
 
 log = get_logger("screenshot_storage")
 
 
-def _blob(mov_id: str):
-    db.init_if_needed()
-    return storage.bucket().blob(f"screenshots/{mov_id}.png")
-
-
 def upload(mov_id: str, png_bytes: bytes) -> None:
-    try:
-        _blob(mov_id).upload_from_string(png_bytes, content_type="image/png")
-    except Exception as e:
-        log.warning(f"upload screenshot {mov_id} falló: {type(e).__name__}: {e}")
+    """No-op: no hay Storage. La foto se persiste implícitamente via TG file_id."""
+    return None
 
 
 def download(mov_id: str) -> bytes | None:
-    try:
-        return _blob(mov_id).download_as_bytes()
-    except Exception as e:
-        log.info(f"screenshot {mov_id} no disponible: {type(e).__name__}: {e}")
-        return None
+    """No-op: no hay Storage. Devuelve None — el caller debe usar `tg_photo_file_id`."""
+    return None
 
 
 def delete(mov_id: str) -> None:
-    try:
-        _blob(mov_id).delete()
-    except Exception as e:
-        log.info(f"delete screenshot {mov_id}: {type(e).__name__}: {e}")
+    """No-op: no hay Storage. El cleanup de `tg_photo_file_id` lo hace Firestore al
+    borrar el doc del mov (campo se va con el documento)."""
+    return None
