@@ -134,9 +134,15 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
         );
         setTimeout(() => setSyncing(false), 8_000);
       } else {
-        const body = await r.json().catch(() => ({}));
-        setSyncMsg(`Error: ${body.message ?? r.statusText}`);
-        setTimeout(() => setSyncing(false), 5_000);
+        const body = (await r.json().catch(() => ({}))) as {
+          error?: string;
+          message?: string;
+        };
+        const detalle = body.message ?? body.error ?? r.statusText ?? "(sin detalle)";
+        setSyncMsg(`Error ${r.status}: ${detalle}`);
+        // Log completo a consola para debug
+        console.error("Patrimonio sync error:", { status: r.status, body });
+        setTimeout(() => setSyncing(false), 8_000);
       }
     } catch (e) {
       setSyncMsg(`Error de red: ${e instanceof Error ? e.message : String(e)}`);
