@@ -144,10 +144,39 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
     }
   }, [router]);
 
+  const warningsHojas = data.warnings.filter((w) =>
+    /Inversiones_Maestro|Inversiones_Snapshot|Patrimonio/i.test(w),
+  );
+
+  const refreshButton = (
+    <button
+      onClick={handleSync}
+      disabled={syncing}
+      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+    >
+      <RefreshCw className={"h-3.5 w-3.5 " + (syncing ? "animate-spin" : "")} />
+      {syncing ? "Actualizando…" : "Actualizar ahora"}
+    </button>
+  );
+
   if (!activos.length) {
     return (
       <div className="space-y-6">
-        <SectionHeader title="Patrimonio" question="Aumenta mi patrimonio y por qué" />
+        <SectionHeader title="Patrimonio" question="Aumenta mi patrimonio y por qué" right={refreshButton} />
+        {syncMsg && (
+          <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/30 dark:text-blue-200">
+            {syncMsg}
+          </div>
+        )}
+        {warningsHojas.length > 0 && (
+          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
+            <p className="font-medium">No pude leer las hojas de inversiones:</p>
+            <ul className="ml-4 mt-1 list-disc">
+              {warningsHojas.map((w, i) => <li key={i}>{w}</li>)}
+            </ul>
+            <p className="mt-2">Verifica en Vercel que <code>GSHEET_SPREADSHEET_ID</code> apunte al spreadsheet correcto y que el service account tenga acceso a esas hojas.</p>
+          </div>
+        )}
         <EmptyState
           icon={<Building className="h-10 w-10" />}
           title="Sin sitios configurados"
@@ -162,16 +191,7 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
       <SectionHeader
         title="Patrimonio"
         question="Aumenta mi patrimonio y por qué"
-        right={
-          <button
-            onClick={handleSync}
-            disabled={syncing}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
-          >
-            <RefreshCw className={"h-3.5 w-3.5 " + (syncing ? "animate-spin" : "")} />
-            {syncing ? "Actualizando…" : "Actualizar ahora"}
-          </button>
-        }
+        right={refreshButton}
       />
 
       {syncMsg && (
