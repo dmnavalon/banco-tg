@@ -6,6 +6,7 @@ import { ResumenGeneralSection } from "./sections/ResumenGeneral";
 import { GastosSection } from "./sections/Gastos";
 import { CalidadDatosSection } from "./sections/CalidadDatos";
 import { AlertasSection } from "./sections/Alertas";
+import { PatrimonioSection } from "./sections/Patrimonio";
 import { PlaceholderSection } from "./sections/Placeholder";
 import { DetalleKpiPanel } from "./ui/DetalleKpiPanel";
 import { ThemeToggle } from "./ui/ThemeToggle";
@@ -144,13 +145,7 @@ export function Dashboard({ kpis, data, spreadsheetId }: { kpis: DashboardKPIs; 
             pestañasRequeridas={["Inversiones_Maestro", "Inversiones_Snapshot", "InversionesObjetivo"]}
           />
         )}
-        {active === "patrimonio" && (
-          <PlaceholderSection
-            title="Patrimonio"
-            question="Aumenta mi patrimonio y por qué"
-            pestañasRequeridas={["Patrimonio", "ActivosIlíquidos"]}
-          />
-        )}
+        {active === "patrimonio" && <PatrimonioSection data={data} />}
         {active === "insights" && (
           <PlaceholderSection
             title="Insights y plan de acción"
