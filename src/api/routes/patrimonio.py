@@ -2,9 +2,15 @@
 
 POST /api/patrimonio/sync   → dispara run_all() en background, 202 + ack
 GET  /api/patrimonio/status → último resumen de corrida (en memoria del proceso)
+
+Patrimonio depende de Mac Keychain + archivos `state_*.json.enc` que viven
+SOLO en la Mac de Diego. En Railway (Linux) no hay Keychain ni esos archivos,
+así que el endpoint detecta el entorno y rechaza con 501. El botón
+"Actualizar ahora" del dashboard interpreta 501 y muestra mensaje claro.
 """
 from __future__ import annotations
 
+import platform
 import threading
 from datetime import datetime
 from typing import Any
@@ -17,6 +23,18 @@ from ..auth import require_token
 log = get_logger("api.patrimonio")
 
 bp = Blueprint("patrimonio", __name__, url_prefix="/api/patrimonio")
+
+
+def _is_local_capable() -> tuple[bool, str]:
+    """True si el entorno puede correr scrapers de patrimonio.
+
+    Requiere macOS (Keychain) y que el módulo se importe limpio. En Railway
+    (Linux) retorna False para que el endpoint rechace con 501 antes de
+    spawnear un thread que crashea silencioso.
+    """
+    if platform.system() != "Darwin":
+        return False, "patrimonio_only_on_local_mac"
+    return True, "ok"
 
 # Estado in-memory del proceso. Single-source: el thread escribe acá, el
 # endpoint GET lee. Si el bot se reinicia, se pierde — está OK porque el
@@ -58,6 +76,12 @@ def _run_in_thread():
 @bp.post("/sync")
 @require_token
 def sync_now():
+    ok, reason = _is_local_capable()
+    if not ok:
+        return jsonify({
+            "error": reason,
+            "message": "Patrimonio scrapers solo corren en la Mac de Diego. Usa el CLI local: `python -m src.patrimonio.cli run`.",
+        }), 501
     with _state_lock:
         if _state["running"]:
             return jsonify({
@@ -78,5 +102,10 @@ def sync_now():
 @bp.get("/status")
 @require_token
 def status():
+    ok, reason = _is_local_capable()
     with _state_lock:
-        return jsonify(dict(_state))
+        body = dict(_state)
+    body["local_capable"] = ok
+    if not ok:
+        body["unavailable_reason"] = reason
+    return jsonify(body)

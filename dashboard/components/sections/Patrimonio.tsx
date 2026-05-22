@@ -126,6 +126,13 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
       } else if (r.status === 409) {
         setSyncMsg("Ya hay una corrida en curso. Esperá un momento.");
         setTimeout(() => setSyncing(false), 5_000);
+      } else if (r.status === 501) {
+        const body = await r.json().catch(() => ({}));
+        setSyncMsg(
+          body.message ??
+            "Este botón solo funciona en local. Corré: python -m src.patrimonio.cli run",
+        );
+        setTimeout(() => setSyncing(false), 8_000);
       } else {
         const body = await r.json().catch(() => ({}));
         setSyncMsg(`Error: ${body.message ?? r.statusText}`);
