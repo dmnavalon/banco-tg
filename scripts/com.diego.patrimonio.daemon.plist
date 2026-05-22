@@ -7,11 +7,12 @@
   <string>com.diego.patrimonio.daemon</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>bash</string>
-    <string>-lc</string>
-    <string>cd "PROJECT_DIR" &amp;&amp; source .venv/bin/activate &amp;&amp; python -m src.patrimonio.daemon &gt;&gt; logs/patrimonio-daemon.log 2&gt;&amp;1</string>
+    <string>PROJECT_DIR/.venv/bin/python</string>
+    <string>-m</string>
+    <string>src.patrimonio.daemon</string>
   </array>
+  <key>WorkingDirectory</key>
+  <string>PROJECT_DIR</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
