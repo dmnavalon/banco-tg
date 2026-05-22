@@ -60,7 +60,7 @@ fi
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
 
-for plist_name in com.diego.bancotg.daily.plist com.diego.bancotg.bot.plist; do
+for plist_name in com.diego.bancotg.daily.plist com.diego.bancotg.bot.plist com.diego.patrimonio.weekly.plist; do
   src_plist="scripts/$plist_name"
   dst_plist="$LAUNCH_AGENTS/$plist_name"
   echo "→ Instalando $plist_name → $LAUNCH_AGENTS/"

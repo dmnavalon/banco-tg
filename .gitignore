@@ -8,3 +8,4 @@ __pycache__/
 *.db
 *.sqlite
 .DS_Store
+src/patrimonio/state/state_*.json.enc
