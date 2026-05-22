@@ -805,3 +805,61 @@ def list_taxonomy_overrides() -> dict[str, list[str]]:
             if clean:
                 out[doc.id] = clean
     return out
+
+
+# ── patrimonio_state (cross-host coordination Railway ↔ Mac local) ─────
+# El bot Railway no puede correr scrapers de patrimonio (no Mac Keychain ni
+# storage Playwright). Cuando el usuario clickea "Actualizar ahora" en el
+# dashboard de producción, Railway escribe un request acá. El daemon que
+# corre en la Mac de Diego polea cada 30s, ve el request nuevo, ejecuta
+# `runner.run_all()` y escribe el resultado. El dashboard polea
+# `/api/patrimonio/status` cada 5s para mostrar el resultado real-time.
+
+_PATRIMONIO_DOC = "patrimonio_state"
+
+
+def request_patrimonio_sync() -> str:
+    """Marca un request nuevo de sync. Devuelve el timestamp del request
+    (sirve como job_id para que el cliente sepa cuál esperar)."""
+    now = _now()
+    _db().collection("config").document(_PATRIMONIO_DOC).set({
+        "last_request_at": now,
+        "updated_at": now,
+    }, merge=True)
+    return now
+
+
+def get_patrimonio_state() -> dict:
+    """Devuelve el estado completo o un dict vacío si no hay nada."""
+    snap = _db().collection("config").document(_PATRIMONIO_DOC).get()
+    return snap.to_dict() if snap.exists else {}
+
+
+def set_patrimonio_running(running: bool, started_at: str | None = None) -> None:
+    payload: dict = {"running": running, "updated_at": _now()}
+    if started_at is not None:
+        payload["started_at"] = started_at
+    _db().collection("config").document(_PATRIMONIO_DOC).set(payload, merge=True)
+
+
+def set_patrimonio_result(
+    summary: dict | None,
+    error: str | None,
+    processed_at: str,
+) -> None:
+    """El daemon llama esto al terminar (con summary) o al fallar (con error)."""
+    _db().collection("config").document(_PATRIMONIO_DOC).set({
+        "summary": summary,
+        "error": error,
+        "last_processed_at": processed_at,
+        "running": False,
+        "updated_at": _now(),
+    }, merge=True)
+
+
+def patrimonio_daemon_heartbeat() -> None:
+    """El daemon llama esto cada loop iteration para que el dashboard pueda
+    detectar si la Mac está respondiendo (heartbeat reciente = OK)."""
+    _db().collection("config").document(_PATRIMONIO_DOC).set({
+        "daemon_heartbeat_at": _now(),
+    }, merge=True)
