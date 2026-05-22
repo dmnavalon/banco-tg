@@ -1,22 +1,25 @@
 """Endpoints HTTP para la sección Patrimonio del dashboard.
 
-POST /api/patrimonio/sync   → dispara run_all() en background, 202 + ack
-GET  /api/patrimonio/status → último resumen de corrida (en memoria del proceso)
+POST /api/patrimonio/sync   → escribe request a Firestore, devuelve 202 + job_id
+GET  /api/patrimonio/status → lee estado de Firestore (running, summary, etc.)
 
-Patrimonio depende de Mac Keychain + archivos `state_*.json.enc` que viven
-SOLO en la Mac de Diego. En Railway (Linux) no hay Keychain ni esos archivos,
-así que el endpoint detecta el entorno y rechaza con 501. El botón
-"Actualizar ahora" del dashboard interpreta 501 y muestra mensaje claro.
+Patrimonio scrapers solo pueden correr en la Mac de Diego (necesitan Keychain
+y archivos `state_*.json.enc` locales). Para que el botón "Actualizar ahora"
+del dashboard de producción funcione, usamos Firestore como buzón:
+
+  Railway: POST /sync → db.request_patrimonio_sync() (escribe last_request_at)
+  Mac:     daemon polea Firestore cada 30s, si hay request nuevo corre run_all()
+  Railway: GET /status → lee db.get_patrimonio_state() (running, summary, ...)
+  Dashboard: polea GET /status cada 5s hasta que last_processed_at > started_at
+
+El campo `daemon_heartbeat_at` permite al dashboard advertir si la Mac de
+Diego está dormida o el daemon caído (heartbeat > 2 min = problema).
 """
 from __future__ import annotations
 
-import platform
-import threading
-from datetime import datetime
-from typing import Any
-
 from flask import Blueprint, jsonify
 
+from ... import db
 from ...utils import get_logger
 from ..auth import require_token
 
@@ -25,87 +28,53 @@ log = get_logger("api.patrimonio")
 bp = Blueprint("patrimonio", __name__, url_prefix="/api/patrimonio")
 
 
-def _is_local_capable() -> tuple[bool, str]:
-    """True si el entorno puede correr scrapers de patrimonio.
-
-    Requiere macOS (Keychain) y que el módulo se importe limpio. En Railway
-    (Linux) retorna False para que el endpoint rechace con 501 antes de
-    spawnear un thread que crashea silencioso.
-    """
-    if platform.system() != "Darwin":
-        return False, "patrimonio_only_on_local_mac"
-    return True, "ok"
-
-# Estado in-memory del proceso. Single-source: el thread escribe acá, el
-# endpoint GET lee. Si el bot se reinicia, se pierde — está OK porque el
-# resultado canónico vive en el GSheet (`Inversiones_Snapshot`).
-_state_lock = threading.Lock()
-_state: dict[str, Any] = {
-    "running": False,
-    "started_at": None,
-    "finished_at": None,
-    "summary": None,  # dict de runner.run_all()
-    "error": None,
-}
-
-
-def _run_in_thread():
-    """Worker que corre run_all() y guarda resultado en `_state`."""
-    from ...patrimonio.runner import run_all
-
-    with _state_lock:
-        _state["running"] = True
-        _state["started_at"] = datetime.now().isoformat(timespec="seconds")
-        _state["finished_at"] = None
-        _state["summary"] = None
-        _state["error"] = None
-    try:
-        summary = run_all()
-        with _state_lock:
-            _state["summary"] = summary
-    except Exception as e:
-        log.exception("Patrimonio run_all falló")
-        with _state_lock:
-            _state["error"] = f"{type(e).__name__}: {e}"
-    finally:
-        with _state_lock:
-            _state["running"] = False
-            _state["finished_at"] = datetime.now().isoformat(timespec="seconds")
-
-
 @bp.post("/sync")
 @require_token
 def sync_now():
-    ok, reason = _is_local_capable()
-    if not ok:
+    """Encola un sync. Si ya hay uno running, rechaza con 409."""
+    try:
+        state = db.get_patrimonio_state()
+    except Exception as e:
+        log.exception("Patrimonio sync: error leyendo Firestore")
+        return jsonify({"error": "firestore_unavailable", "message": str(e)}), 503
+
+    if state.get("running"):
         return jsonify({
-            "error": reason,
-            "message": "Patrimonio scrapers solo corren en la Mac de Diego. Usa el CLI local: `python -m src.patrimonio.cli run`.",
-        }), 501
-    with _state_lock:
-        if _state["running"]:
-            return jsonify({
-                "status": "already_running",
-                "started_at": _state["started_at"],
-            }), 409
-        # Lanzar el thread mientras tenemos el lock para evitar doble dispatch.
-        # `daemon=True` para que no bloquee el shutdown del proceso si Diego
-        # cierra el bot mientras corre un sync.
-        t = threading.Thread(target=_run_in_thread, daemon=True, name="patrimonio-sync")
-        t.start()
-        started_at = datetime.now().isoformat(timespec="seconds")
-        _state["running"] = True  # optimista, el thread re-confirma
-        _state["started_at"] = started_at
-    return jsonify({"status": "started", "started_at": started_at}), 202
+            "status": "already_running",
+            "started_at": state.get("started_at"),
+        }), 409
+
+    try:
+        request_at = db.request_patrimonio_sync()
+    except Exception as e:
+        log.exception("Patrimonio sync: error escribiendo request a Firestore")
+        return jsonify({"error": "firestore_unavailable", "message": str(e)}), 503
+
+    return jsonify({
+        "status": "queued",
+        "request_at": request_at,
+        "note": "El daemon en la Mac de Diego polea Firestore cada 30s y procesará este request.",
+    }), 202
 
 
 @bp.get("/status")
 @require_token
 def status():
-    ok, reason = _is_local_capable()
-    with _state_lock:
-        body = dict(_state)
-    body["local_capable"] = ok
-    if not ok:
-        body["unavailable_reason"] = reason
-    return jsonify(body)
+    try:
+        state = db.get_patrimonio_state()
+    except Exception as e:
+        log.exception("Patrimonio status: error leyendo Firestore")
+        return jsonify({"error": "firestore_unavailable", "message": str(e)}), 503
+
+    # Asegurar que ciertos campos siempre existan para que el cliente no
+    # tenga que defenderse de undefined.
+    out = {
+        "running": bool(state.get("running")),
+        "started_at": state.get("started_at"),
+        "last_request_at": state.get("last_request_at"),
+        "last_processed_at": state.get("last_processed_at"),
+        "daemon_heartbeat_at": state.get("daemon_heartbeat_at"),
+        "summary": state.get("summary"),
+        "error": state.get("error"),
+    }
+    return jsonify(out)

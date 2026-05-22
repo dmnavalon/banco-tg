@@ -8,3 +8,9 @@ logs/
 .DS_Store
 *.sqlite
 *.db
+src/patrimonio/state/state_*.json.enc
+dashboard/node_modules/
+dashboard/.next/
+dashboard/.vercel/
+.git/
+.pytest_cache/

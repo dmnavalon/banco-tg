@@ -113,26 +113,26 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
 
   const handleSync = useCallback(async () => {
     setSyncing(true);
-    setSyncMsg("Disparando actualización…");
+    setSyncMsg("Encolando request…");
     try {
       const r = await fetch("/api/patrimonio/sync", { method: "POST" });
       if (r.status === 202) {
-        setSyncMsg("Scrapers corriendo. Esperando ~90s antes de recargar…");
-        setTimeout(() => {
-          router.refresh();
-          setSyncing(false);
-          setSyncMsg(null);
-        }, 90_000);
+        const body = (await r.json().catch(() => ({}))) as {
+          request_at?: string;
+        };
+        const requestAt = body.request_at ?? new Date().toISOString();
+        setSyncMsg("Request encolado. Esperando que tu Mac lo procese…");
+        await pollStatusUntilDone(requestAt, setSyncMsg, router);
+        setSyncing(false);
+        setSyncMsg(null);
       } else if (r.status === 409) {
-        setSyncMsg("Ya hay una corrida en curso. Esperá un momento.");
-        setTimeout(() => setSyncing(false), 5_000);
-      } else if (r.status === 501) {
-        const body = await r.json().catch(() => ({}));
+        const body = (await r.json().catch(() => ({}))) as { started_at?: string };
         setSyncMsg(
-          body.message ??
-            "Este botón solo funciona en local. Corré: python -m src.patrimonio.cli run",
+          `Ya hay una corrida en curso (desde ${body.started_at ?? "?"}). Esperando…`,
         );
-        setTimeout(() => setSyncing(false), 8_000);
+        await pollStatusUntilDone(null, setSyncMsg, router);
+        setSyncing(false);
+        setSyncMsg(null);
       } else {
         const body = (await r.json().catch(() => ({}))) as {
           error?: string;
@@ -140,7 +140,6 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
         };
         const detalle = body.message ?? body.error ?? r.statusText ?? "(sin detalle)";
         setSyncMsg(`Error ${r.status}: ${detalle}`);
-        // Log completo a consola para debug
         console.error("Patrimonio sync error:", { status: r.status, body });
         setTimeout(() => setSyncing(false), 8_000);
       }
@@ -305,5 +304,95 @@ function EditHint({ id }: { id: string }) {
     >
       <Pencil className="inline h-3.5 w-3.5" />
     </span>
+  );
+}
+
+interface PatrimonioStatus {
+  running: boolean;
+  started_at: string | null;
+  last_request_at: string | null;
+  last_processed_at: string | null;
+  daemon_heartbeat_at: string | null;
+  summary: { total_clp?: number; ok?: number; errors?: number } | null;
+  error: string | null;
+}
+
+function parseTs(s: string | null | undefined): number {
+  if (!s) return 0;
+  // Format: "YYYY-MM-DD HH:MM:SS" (timezone-naive de Santiago)
+  const d = new Date(s.replace(" ", "T"));
+  return d.getTime() || 0;
+}
+
+function heartbeatStale(s: PatrimonioStatus): boolean {
+  if (!s.daemon_heartbeat_at) return true;
+  const age = Date.now() - parseTs(s.daemon_heartbeat_at);
+  // Daemon polea cada 30s. Si pasaron >2 min sin heartbeat, está caído o Mac dormida.
+  return age > 120_000;
+}
+
+/**
+ * Polea /api/patrimonio/status cada 5s hasta que se complete el job.
+ * Si `requestAt` viene, espera específicamente a que se procese ESE request.
+ * Si es null, espera a que termine cualquier corrida en curso.
+ */
+async function pollStatusUntilDone(
+  requestAt: string | null,
+  setMsg: (m: string | null) => void,
+  router: ReturnType<typeof useRouter>,
+): Promise<void> {
+  const maxWaitMs = 8 * 60 * 1000; // 8 minutos
+  const deadline = Date.now() + maxWaitMs;
+  let warned_dormant = false;
+
+  while (Date.now() < deadline) {
+    await new Promise((res) => setTimeout(res, 5_000));
+    let s: PatrimonioStatus;
+    try {
+      const r = await fetch("/api/patrimonio/status", { cache: "no-store" });
+      s = (await r.json()) as PatrimonioStatus;
+    } catch {
+      setMsg("Sin conexión al backend. Reintentando…");
+      continue;
+    }
+
+    if (!warned_dormant && heartbeatStale(s)) {
+      setMsg(
+        "⚠️ Tu Mac no está respondiendo (sin heartbeat hace >2 min). ¿Está encendida y el daemon corriendo?",
+      );
+      warned_dormant = true;
+      continue;
+    }
+
+    if (s.running) {
+      setMsg(`Scrapers corriendo en tu Mac (desde ${s.started_at})…`);
+      continue;
+    }
+
+    // Job terminado. Verificá que se procesó nuestro request (o que es más reciente que cuando arrancamos).
+    const processed = parseTs(s.last_processed_at);
+    const targetTs = requestAt ? parseTs(requestAt) : 0;
+    if (processed >= targetTs && processed > 0) {
+      if (s.error) {
+        setMsg(`Error en la corrida: ${s.error}`);
+        return;
+      }
+      const total = s.summary?.total_clp;
+      const ok = s.summary?.ok ?? 0;
+      const errs = s.summary?.errors ?? 0;
+      const totalStr =
+        total !== undefined
+          ? new Intl.NumberFormat("es-CL", { style: "currency", currency: "CLP", maximumFractionDigits: 0 }).format(total)
+          : "?";
+      setMsg(`✓ Actualizado · ${totalStr} · ${ok} sitios OK · ${errs} con error · refrescando…`);
+      router.refresh();
+      // Pequeño delay para que el usuario vea el mensaje antes de la recarga
+      await new Promise((res) => setTimeout(res, 2_000));
+      return;
+    }
+  }
+
+  setMsg(
+    "Timeout de 8 min sin respuesta. Verificá que tu Mac esté encendida y el daemon corriendo (`launchctl list | grep patrimonio.daemon`).",
   );
 }
