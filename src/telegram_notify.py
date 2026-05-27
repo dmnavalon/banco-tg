@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import time
 from html import escape as _esc
@@ -489,11 +490,21 @@ def _send_one_card(mov: dict, target: str) -> bool:
     screenshot = mov.get("screenshot_bytes")
     file_id = mov.get("tg_photo_file_id")
 
-    # Antes había fallback a screenshot_storage.download(mov_id) acá. Removido
-    # 2026-05-15: el proyecto Firebase no tiene Storage habilitado y no
-    # queremos pasar a Blaze. La persistencia depende exclusivamente de
-    # `tg_photo_file_id` (Firestore). Si no hay ninguno de los dos, el envío
-    # cae al fallback de texto plano más abajo.
+    # Fuente de foto para movs de overflow: durante el daily, los movs que no
+    # caben en el batch persisten su PNG como `screenshot_b64` en Firestore
+    # (ver send_movement_cards). Cuando /next los reenvía, vienen de DB sin
+    # `screenshot_bytes` en memoria pero sí con `screenshot_b64`. Lo decodificamos
+    # acá para mandarlos con foto en vez de texto plano. Tras subirlos a TG y
+    # capturar el file_id, limpiamos el b64 (abajo) para ahorrar espacio.
+    had_persisted_b64 = False
+    if not screenshot and not file_id:
+        b64 = mov.get("screenshot_b64")
+        if b64:
+            try:
+                screenshot = base64.b64decode(b64)
+                had_persisted_b64 = True
+            except Exception as e:
+                log.warning(f"No pude decodificar screenshot_b64 de {mov_id}: {e}")
 
     base_url = f"{TG_API}/bot{_bot_token()}"
 
@@ -542,6 +553,13 @@ def _send_one_card(mov: dict, target: str) -> bool:
                                 db.set_movement_photo_file_id(mov_id, new_file_id)
                             except Exception as e:
                                 log.warning(f"No pude guardar tg_photo_file_id de {mov_id}: {e}")
+                    # El b64 persistido (overflow) ya cumplió su rol: ahora hay
+                    # file_id para reenvíos. Limpiamos para no acumular PNGs en DB.
+                    if had_persisted_b64:
+                        try:
+                            db.clear_movement_screenshot_b64(mov_id)
+                        except Exception as e:
+                            log.warning(f"No pude limpiar screenshot_b64 de {mov_id}: {e}")
                 return True
             log.warning(f"send card {r.status_code}: {r.text[:200]}")
         except requests.RequestException as e:
@@ -599,6 +617,18 @@ def send_movement_cards(movements: Sequence[dict]) -> bool:
     # de una sola card usan `resend_movement_card` (no toca `last_batch_*`).
     if overflow:
         overflow_ids = [m["id"] for m in overflow]
+        # Persistir el screenshot de cada mov de overflow en Firestore. Los
+        # `screenshot_bytes` solo viven en memoria durante este proceso (el
+        # daily); /next corre en el bot y lee de DB. Sin esto, los movs de
+        # overflow se reenviaban como texto plano (bug: Falabella acumula >5
+        # movs/día → la mayoría sin foto). El b64 se limpia tras subir a TG.
+        for m in overflow:
+            sb = m.get("screenshot_bytes")
+            if sb:
+                try:
+                    db.set_movement_screenshot_b64(m["id"], base64.b64encode(sb).decode("ascii"))
+                except Exception as e:
+                    log.warning(f"No pude persistir screenshot_b64 de {m.get('id')}: {e}")
         db.set_config("last_batch_remaining", ",".join(overflow_ids))
         send_message(
             f"📦 Te mostré {len(ids_sent)} de {total}. "
