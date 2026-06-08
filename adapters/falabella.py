@@ -463,8 +463,11 @@ def _parse_row(cells: list[str]) -> dict | None:
     Cuotas, Cuota a pagar, Cambio cuotas, Vacío.
 
     Devuelve `persona` como campo separado (Titular / Adicional / nombre del
-    adicional) en vez de inyectarlo en la descripción. La descripción mantiene
-    "(X/N)" como sufijo para identificación rápida.
+    adicional) en vez de inyectarlo en la descripción. La descripción va SIN el
+    sufijo de cuota "(N/M)": las cuotas se devuelven como campos separados
+    (`cuotas_actual`/`cuotas_total`) para no romper la estabilidad del hash del
+    `movement_id` (si no, "(2/12)" → "(3/12)" generaría dos movimientos para la
+    misma compra original).
 
     Para compras en cuotas (cuotas_total > 1), persiste:
       - cuotas_actual: nº de cuota actual (ej. 2)
