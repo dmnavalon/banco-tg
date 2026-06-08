@@ -178,6 +178,24 @@ def set_movement_photo_file_id(mov_id: str, file_id: str) -> None:
     _db().collection("movements").document(mov_id).update({"tg_photo_file_id": file_id})
 
 
+def set_movement_screenshot_b64(mov_id: str, b64: str) -> None:
+    """Persiste el screenshot del modal (base64) en el doc del movimiento.
+
+    Se usa para los movs que quedan en overflow del batch del daily: sus
+    `screenshot_bytes` solo viven en memoria durante el scrape, así que sin
+    esto, cuando el usuario manda /next el bot los reenviaría como texto plano.
+    Guardar el PNG en Firestore (Database, no Storage — gratis en Spark, ~40KB
+    por mov, muy por debajo del límite de 1MB/doc) permite que /next los envíe
+    con foto. Se limpia (`clear_movement_screenshot_b64`) tras subir a TG, una
+    vez que ya tenemos `tg_photo_file_id` para reenvíos futuros."""
+    _db().collection("movements").document(mov_id).update({"screenshot_b64": b64})
+
+
+def clear_movement_screenshot_b64(mov_id: str) -> None:
+    """Borra el screenshot base64 persistido (ya tenemos tg_photo_file_id)."""
+    _db().collection("movements").document(mov_id).update({"screenshot_b64": None})
+
+
 def update_classification(
     mov_id: str,
     *,
