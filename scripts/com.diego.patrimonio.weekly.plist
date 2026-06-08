@@ -1,33 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.diego.patrimonio.weekly</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>PROJECT_DIR/.venv/bin/python</string>
-    <string>-m</string>
-    <string>src.patrimonio.cli</string>
-    <string>run</string>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.diego.patrimonio.weekly</string>
+  <!-- logs fuera de ~/Desktop (TCC); cd en shell, no WorkingDirectory. Ver fix 2026-06-08. -->
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/caffeinate</string><string>-i</string>
+    <string>/bin/zsh</string><string>-c</string>
+    <string>cd "PROJECT_DIR" &amp;&amp; exec .venv/bin/python -m src.patrimonio.cli run</string>
   </array>
-  <key>WorkingDirectory</key>
-  <string>PROJECT_DIR</string>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Weekday</key>
-    <integer>0</integer>
-    <key>Hour</key>
-    <integer>22</integer>
-    <key>Minute</key>
-    <integer>0</integer>
+  <key>StartCalendarInterval</key><dict>
+    <key>Weekday</key><integer>0</integer><key>Hour</key><integer>22</integer><key>Minute</key><integer>0</integer>
   </dict>
-  <key>RunAtLoad</key>
-  <false/>
-  <key>StandardOutPath</key>
-  <string>PROJECT_DIR/logs/patrimonio.stdout.log</string>
-  <key>StandardErrorPath</key>
-  <string>PROJECT_DIR/logs/patrimonio.stderr.log</string>
-</dict>
-</plist>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>/Users/diego/Library/Logs/bancotg/patrimonio.launchd.out</string>
+  <key>StandardErrorPath</key><string>/Users/diego/Library/Logs/bancotg/patrimonio.launchd.err</string>
+</dict></plist>

@@ -5,25 +5,29 @@
 <dict>
   <key>Label</key>
   <string>com.diego.bancotg.daily</string>
+  <!-- IMPORTANTE: el proyecto vive en ~/Desktop (protegido por TCC). launchd NO
+       puede abrir StandardOut/ErrPath dentro de ~/Desktop ni el shell puede
+       redirigir ahí (operation not permitted -> EX_CONFIG 78). Por eso los logs
+       de launchd van a ~/Library/Logs/bancotg/ y el cd se hace dentro del shell
+       (no via WorkingDirectory). Ver fix 2026-06-08. -->
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/env</string>
-    <string>bash</string>
-    <string>-lc</string>
-    <string>cd "PROJECT_DIR" &amp;&amp; source .venv/bin/activate &amp;&amp; python -m src.run_daily &gt;&gt; logs/daily.log 2&gt;&amp;1</string>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>/bin/zsh</string>
+    <string>-c</string>
+    <string>cd "PROJECT_DIR" &amp;&amp; exec .venv/bin/python -m src.run_daily</string>
   </array>
   <key>StartCalendarInterval</key>
   <dict>
-    <key>Hour</key>
-    <integer>8</integer>
-    <key>Minute</key>
-    <integer>30</integer>
+    <key>Hour</key><integer>7</integer>
+    <key>Minute</key><integer>56</integer>
   </dict>
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>
-  <string>PROJECT_DIR/logs/daily.stdout.log</string>
+  <string>/Users/diego/Library/Logs/bancotg/daily.launchd.out</string>
   <key>StandardErrorPath</key>
-  <string>PROJECT_DIR/logs/daily.stderr.log</string>
+  <string>/Users/diego/Library/Logs/bancotg/daily.launchd.err</string>
 </dict>
 </plist>

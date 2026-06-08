@@ -59,6 +59,9 @@ fi
 # 7. plists con la ruta absoluta
 LAUNCH_AGENTS="$HOME/Library/LaunchAgents"
 mkdir -p "$LAUNCH_AGENTS"
+# Logs de launchd FUERA de ~/Desktop (TCC bloquea que launchd abra StandardOut/Err
+# dentro de Desktop -> EX_CONFIG 78). Ver scripts/com.diego.bancotg.daily.plist.
+mkdir -p "$HOME/Library/Logs/bancotg"
 
 for plist_name in com.diego.bancotg.daily.plist com.diego.bancotg.bot.plist com.diego.patrimonio.weekly.plist com.diego.patrimonio.daemon.plist; do
   src_plist="scripts/$plist_name"
