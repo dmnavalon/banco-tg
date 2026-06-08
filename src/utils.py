@@ -19,6 +19,19 @@ def normalize(s: str | None) -> str:
     return re.sub(r"\s+", " ", s).strip().upper()
 
 
+_RE_CUOTA_SUFFIX = re.compile(r"\s*\(\s*\d+\s*/\s*\d+\s*\)\s*$")
+
+
+def canonical_description(s: str | None) -> str:
+    """Descripción canónica para hashing: quita sufijos volátiles tipo `(01/01)`
+    o `(02/12)` que aparecen/desaparecen entre versiones del scraper. Sin esto,
+    un mismo movimiento físico genera dos docs en Firestore cuando el parser
+    cambia el formato (incidente 2026-05-09 con Falabella)."""
+    if not s:
+        return ""
+    return _RE_CUOTA_SUFFIX.sub("", s).strip()
+
+
 def movement_id(
     date_iso: str,
     amount: float,
@@ -30,7 +43,7 @@ def movement_id(
     parts = [
         date_iso,
         f"{amount:.2f}",
-        normalize(description),
+        normalize(canonical_description(description)),
         normalize(bank),
         normalize(account or ""),
     ]
