@@ -33,7 +33,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src import db
-from src.utils import canonical_description, get_logger, normalize, project_path
+from src.utils import canonical_description, get_logger, movement_id, normalize, project_path
 
 log = get_logger("dedupe")
 
@@ -67,16 +67,42 @@ def _decision_time(doc: dict) -> str:
     )
 
 
+def _is_canonical_id(doc: dict) -> bool:
+    """True si el id del doc coincide con el hash que produce el parser ACTUAL.
+    Un doc no-canónico (ej. hash calculado con sufijo `(N/M)` en la descripción)
+    no debe ganar nunca: si gana y se borra el canónico, el scrape diario
+    re-crea el doc borrado con el hash actual y el duplicado reaparece — eso
+    fue exactamente lo que pasó tras el run del 2026-05-21."""
+    for dup_idx in range(3):
+        try:
+            expected = movement_id(
+                date_iso=doc.get("date") or "",
+                amount=float(doc.get("amount") or 0),
+                description=doc.get("description") or "",
+                bank=doc.get("bank") or "",
+                account=doc.get("account"),
+                dup_idx=dup_idx,
+            )
+        except Exception:
+            return False
+        if doc.get("id") == expected:
+            return True
+    return False
+
+
 def _progress_score(doc: dict) -> tuple:
     """Score para elegir winner. Más alto = se queda. Tuplas comparan
     elemento a elemento, así que el orden expresa prioridad:
 
-      1. Tener sheet_row_id (ya está en el GSheet — preservar esa fila)
-      2. Tener final_category válida (no QA-*)
-      3. Estar aprobado
-      4. Tener comercio
-      5. inserted_at más viejo (estabilidad histórica)
+      1. Id canónico (re-generable por el parser actual — si gana otro, el
+         scrape diario re-crea al borrado y el duplicado vuelve)
+      2. Tener sheet_row_id (ya está en el GSheet — preservar esa fila)
+      3. Tener final_category válida (no QA-*)
+      4. Estar aprobado
+      5. Tener comercio
+      6. inserted_at más viejo (estabilidad histórica)
     """
+    is_canonical = 1 if _is_canonical_id(doc) else 0
     has_sheet_row = 1 if doc.get("sheet_row_id") else 0
     has_final_cat = 1 if _real_final_category(doc) else 0
     is_approved = 1 if (doc.get("review_status") in _APPROVED_STATUSES
@@ -85,7 +111,7 @@ def _progress_score(doc: dict) -> tuple:
     inserted = doc.get("inserted_at") or ""
     # inserted_at más viejo gana → negar para que score más alto = más viejo.
     inserted_neg = tuple(-ord(c) for c in inserted[:19])
-    return (has_sheet_row, has_final_cat, is_approved, has_comercio, inserted_neg)
+    return (is_canonical, has_sheet_row, has_final_cat, is_approved, has_comercio, inserted_neg)
 
 
 def _key_for(doc: dict) -> tuple:
@@ -106,7 +132,8 @@ _MERGE_FIELDS = [
     "cuotas_actual", "cuotas_total", "cuota_monto", "saldo",
     "tg_photo_file_id", "raw_blob",
     "ignore_reason", "comment", "pregunta_sugerida",
-    "sheet_row_id",
+    # OJO: sheet_row_id NO se mergea — la fila del loser se borra; la fila
+    # correcta del winner la fija _reindex_sheet_row_ids al final.
 ]
 
 
@@ -136,15 +163,22 @@ def _build_merge_patch(winner: dict, losers: list[dict]) -> dict:
                 break
 
     # Override de categoría si hay decisión más fresca en un loser.
+    # Guard: una corrección humana del winner (corrected_by seteado) solo puede
+    # ser pisada por otra corrección humana — nunca por una clasificación
+    # automática del loser que casualmente tenga timestamp más nuevo (ej. por
+    # un resync).
     w_decision = _decision_time(winner)
     w_cat = _real_final_category(winner)
     w_sub = winner.get("final_subcategory")
+    w_human = bool(winner.get("corrected_by"))
     best_loser_cat = None
     best_loser_sub = None
     best_decision = w_decision
     for L in losers:
         l_cat = _real_final_category(L)
         if not l_cat:
+            continue
+        if w_human and not L.get("corrected_by"):
             continue
         l_decision = _decision_time(L)
         if l_decision > best_decision and l_cat != w_cat:
@@ -235,7 +269,11 @@ def plan_dedupe(client) -> dict:
     return plan
 
 
-def apply_plan(client, plan: dict) -> dict:
+def apply_plan(client, plan: dict, extra_rows: list[int] | None = None) -> dict:
+    """Aplica el plan. `extra_rows` son filas duplicadas del GSheet detectadas
+    aparte (sin doc Firestore loser); se borran en la MISMA pasada descendente
+    que las filas de losers — borrar en dos pasadas separadas corre los índices
+    y termina borrando filas equivocadas."""
     from src import gsheet
     sheet = None
     try:
@@ -243,7 +281,7 @@ def apply_plan(client, plan: dict) -> dict:
     except Exception as e:
         log.warning(f"No pude abrir GSheet — se omite limpieza de filas: {e}")
 
-    rows_to_delete: list[int] = []
+    rows_to_delete: list[int] = list(extra_rows or [])
     resync_winners: list[str] = []
     results = {
         "updated": 0, "deleted": 0,
@@ -305,6 +343,39 @@ def apply_plan(client, plan: dict) -> dict:
             except Exception as e:
                 results["errors"].append({"op": "gsheet_resync", "id": wid, "err": str(e)})
                 log.exception(f"Resync GSheet falló para {wid}")
+    return results
+
+
+def _reindex_sheet_row_ids(client, sheet) -> dict:
+    """Tras borrar filas, los sheet_row_id de TODOS los docs con fila debajo
+    quedan corridos. Lee la columna MovementId completa y corrige en Firestore
+    los que cambiaron. Idempotente."""
+    from src import gsheet
+    results = {"checked": 0, "fixed": 0, "errors": []}
+    ID = gsheet._COL_MOVEMENT_ID - 1
+    all_rows = sheet.get_all_values()
+    row_by_id: dict[str, int] = {}
+    for i, row in enumerate(all_rows[1:], start=2):
+        mid = (row[ID] if len(row) > ID else "").lstrip("'").strip()
+        if mid and mid not in row_by_id:
+            row_by_id[mid] = i
+
+    for d in client.collection("movements").get():
+        doc = d.to_dict()
+        mid = doc.get("id") or d.id
+        current = doc.get("sheet_row_id")
+        actual = row_by_id.get(mid)
+        if actual is None:
+            continue
+        results["checked"] += 1
+        if current != actual:
+            try:
+                client.collection("movements").document(d.id).update({"sheet_row_id": actual})
+                results["fixed"] += 1
+                log.info(f"REINDEX sheet_row_id {mid}: {current} → {actual}")
+            except Exception as e:
+                results["errors"].append({"op": "reindex", "id": mid, "err": str(e)})
+    log.info(f"Re-index sheet_row_id: {results['fixed']} corregidos de {results['checked']} con fila.")
     return results
 
 
@@ -409,6 +480,15 @@ def main() -> int:
                     results["errors"].append({"op": "gsheet_extra", "row": r, "err": str(e)})
         except Exception as e:
             log.warning(f"No pude procesar extras GSheet: {e}")
+
+    # Re-index: tras borrar filas, los sheet_row_id almacenados quedan corridos.
+    try:
+        from src import gsheet
+        sheet = gsheet._client().open_by_key(gsheet.SPREADSHEET_ID).worksheet(gsheet.SHEET_NAME)
+        results["reindex"] = _reindex_sheet_row_ids(client, sheet)
+    except Exception as e:
+        log.warning(f"Re-index de sheet_row_id falló: {e}")
+        results["errors"].append({"op": "reindex_global", "err": str(e)})
 
     results_path = project_path("logs", f"dedupe_results_{ts}.json")
     results_path.write_text(json.dumps(results, ensure_ascii=False, default=str, indent=2))

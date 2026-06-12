@@ -102,7 +102,7 @@ interface MutationResult {
 
 export async function postSingle(
   id: string,
-  action: "approve" | "correct" | "approve-correction" | "ignore" | "reopen" | "sync",
+  action: "approve" | "correct" | "approve-correction" | "ignore" | "reopen" | "sync" | "flags",
   payload: Record<string, unknown>,
 ): Promise<MutationResult> {
   const r = await fetchBackend(

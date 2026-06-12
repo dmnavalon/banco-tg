@@ -11,6 +11,7 @@ const ALLOWED = new Set([
   "ignore",
   "reopen",
   "sync",
+  "flags",
 ]);
 
 type Action =
@@ -19,7 +20,8 @@ type Action =
   | "approve-correction"
   | "ignore"
   | "reopen"
-  | "sync";
+  | "sync"
+  | "flags";
 
 export async function POST(
   request: Request,

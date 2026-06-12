@@ -68,6 +68,32 @@ export interface Movimiento {
   notified_at: string | null;
   inserted_at: string | null;
   updated_at: string | null;
+
+  // Campos manuales (fuente de verdad Firestore desde 2026-06-12; antes se
+  // editaban a mano en el Sheet). Pueden venir null o ausentes en movimientos
+  // viejos. null = sin override manual → el sistema deriva el valor por defecto.
+  moneda?: "CLP" | "USD" | "UF" | null;
+  monto_clp?: number | null;
+  esencial?: boolean | null;
+  fijo?: boolean | null;
+  recurrente?: boolean | null;
+  extraordinario?: boolean | null;
+  excluido?: boolean | null;
+  notas?: string | null;
+}
+
+// Subset de campos manuales que acepta POST /api/movements/<id>/flags.
+// Enviar solo los campos que cambiaron; `null` limpia el campo (el backend
+// vuelve al default derivado).
+export interface ManualFields {
+  moneda?: "CLP" | "USD" | "UF" | null;
+  monto_clp?: number | null;
+  esencial?: boolean | null;
+  fijo?: boolean | null;
+  recurrente?: boolean | null;
+  extraordinario?: boolean | null;
+  excluido?: boolean | null;
+  notas?: string | null;
 }
 
 export interface AuditEvent {

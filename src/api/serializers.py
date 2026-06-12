@@ -19,6 +19,10 @@ _FIELDS = (
     "cuotas_actual", "cuotas_total", "cuota_monto", "saldo",
     "tg_photo_file_id", "notified_at",
     "inserted_at", "updated_at",
+    # Campos manuales por movimiento (fuente: Firestore desde 2026-06-12).
+    # Ausente/None = usar el default que deriva el dashboard.
+    "moneda", "monto_clp", "esencial", "fijo",
+    "recurrente", "extraordinario", "excluido", "notas",
 )
 
 

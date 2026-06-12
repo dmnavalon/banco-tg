@@ -21,14 +21,16 @@ _BASE_TAXONOMY: dict[str, list[str]] = {
     # INGRESOS
     "Sueldo":                       ["Sueldo principal", "Sueldo secundario"],
     "Honorarios":                   ["Boletas de honorarios"],
-    "Dividendos y utilidades":      ["Dividendos empresas", "Retiros de empresa"],
+    # "Retiros de empresa" eliminado (2026-06-12): Diego no tiene retiros; esos
+    # ingresos son devoluciones de rendiciones → Gastos por rendir/<entidad>.
+    "Dividendos y utilidades":      ["Dividendos empresas"],
     "Inversiones":                  ["Intereses", "Dividendos financieros", "Venta de activos"],
     "Arriendos":                    ["Ingreso por arriendo"],
-    "Reembolsos":                   ["Reembolso empresa", "Devolución comercio", "Seguro reembolsado"],
-    "Otros ingresos":               ["Regalos recibidos", "Ingresos extraordinarios"],
+    "Reembolsos":                   ["Reembolso empresa", "Devolución comercio", "Seguro reembolsado", "Reembolso familiar", "Reembolso de amigos"],
+    "Otros ingresos":               ["Regalos recibidos", "Ingresos extraordinarios", "Préstamo recibido"],
     # EGRESOS
     "Hogar y alimentación":         ["Supermercado", "Alimentos", "Panadería", "Carnicería", "Verduras y frutas", "Delivery", "Restaurantes", "Cafeterías"],
-    "Vivienda":                     ["Arriendo o dividendo", "Contribuciones", "Gastos comunes", "Mantención casa", "Jardín y piscina", "Muebles y decoración"],
+    "Vivienda":                     ["Arriendo o dividendo", "Contribuciones", "Gastos comunes", "Mantención casa", "Remodelación Casa", "Jardín y piscina", "Muebles y decoración"],
     "Servicios básicos":            ["Luz", "Agua", "Gas", "Internet", "Telefonía móvil", "Streaming", "Alarmas y seguridad"],
     "Educación":                    ["Colegio", "Jardín infantil", "Educación Hijos", "Matrícula", "Útiles escolares", "Uniformes", "Transporte escolar", "Actividades escolares"],
     "Niños":                        ["Actividades extracurriculares", "Juguetes", "Cumpleaños", "Ropa niños", "Salud niños", "Deportes niños"],
@@ -40,7 +42,7 @@ _BASE_TAXONOMY: dict[str, list[str]] = {
     "Tecnología":                   ["Software y suscripciones", "Hardware", "Celulares", "Apps", "Soporte técnico"],
     "Servicios domésticos":         ["Nana", "Imposiciones nana", "Aseo", "Reparaciones menores"],
     "Mascotas":                     ["Alimento mascotas", "Veterinario", "Accesorios mascotas"],
-    "Finanzas e impuestos":         ["Pago tarjeta de crédito", "Intereses y comisiones", "Impuestos", "Contador", "Seguros financieros"],
+    "Finanzas e impuestos":         ["Pago tarjeta de crédito", "Intereses y comisiones", "Impuestos", "Contador", "Seguros financieros", "Deuda pagada"],
     "Ahorro e inversión":           ["Ahorro mensual", "Inversión financiera", "Fondo emergencia", "APV"],
     "Transferencias internas":      ["Movimiento entre cuentas", "Pago tarjeta mismo titular", "Traspaso a inversión"],
     # Gastos hechos con tarjeta personal pero que se rinden a un tercero (empresa o familiar).
