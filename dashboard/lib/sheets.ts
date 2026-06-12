@@ -119,6 +119,15 @@ const REQUIRED_MOV_COLS = [
   "Recurrente", "Extraordinario", "Excluido", "Notas",
 ] as const;
 
+// Overrides por subcategoría: casos donde el tipo de la categoría completa no
+// aplica. Vender un activo (ej. rescate Fintual) es traspaso inversión → caja,
+// no ingreso nuevo. Pagar la tarjeta propia es traspaso entre cuentas — las
+// compras de la tarjeta ya se cuentan una a una como gasto.
+const SUBCAT_TIPO_OVERRIDE: Record<string, TipoMovimiento> = {
+  "Venta de activos": "RetiroInversión",
+  "Pago tarjeta de crédito": "MovimientoInterno",
+};
+
 async function readMovimientos(taxonomia: TaxonomiaRow[], warnings: string[]): Promise<Movimiento[]> {
   // Lee header dinámicamente para no atar el dashboard a un orden de columnas
   // específico. Si el sheet se reordena (ej. extend_sheet_header.py inserta
@@ -207,13 +216,10 @@ async function readMovimientos(taxonomia: TaxonomiaRow[], warnings: string[]): P
     const recurrente = parseBool(get(r, "Recurrente"));
     const extraordinario = parseBool(get(r, "Extraordinario"));
     const excluido = parseBool(get(r, "Excluido"));
-    // Vender un activo (ej. rescate Fintual) no es ingreso nuevo: es un
-    // traspaso inversión → caja. Se fuerza RetiroInversión aunque la taxonomía
-    // marque la categoría "Inversiones" como Ingreso.
     const tipoMovimiento: TipoMovimiento =
-      subcategoria === "Venta de activos"
-        ? "RetiroInversión"
-        : tax?.tipoMovimiento ?? (tipoStr === "Abono" ? "Ingreso" : "GastoReal");
+      SUBCAT_TIPO_OVERRIDE[subcategoria] ??
+      tax?.tipoMovimiento ??
+      (tipoStr === "Abono" ? "Ingreso" : "GastoReal");
     const saldoRaw = get(r, "Saldo");
 
     result.push({
