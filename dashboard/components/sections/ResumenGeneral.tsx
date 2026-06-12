@@ -62,8 +62,9 @@ export function ResumenGeneralSection({ kpis, onKpiClick }: { kpis: DashboardKPI
                 Cada punto agrupa los movimientos del mes correspondiente:
               </p>
               <ul className="mt-1.5 ml-4 list-disc space-y-0.5">
-                <li><b>Ingresos</b>: Σ movs con tipoMovimiento=Ingreso (sin internos).</li>
-                <li><b>Gastos</b>: Σ movs con tipoMovimiento=GastoReal usando el monto del mes (Cuota a pagar si está en cuotas, monto total si no).</li>
+                <li><b>Ingresos</b>: Σ movs con tipoMovimiento=Ingreso (sin internos ni ventas de activos, que son traspasos inversión→caja).</li>
+                <li><b>Gastos</b>: Σ movs con tipoMovimiento=GastoReal usando el monto del mes (Cuota a pagar si está en cuotas, monto total si no). Aportes a inversión no son gasto.</li>
+                <li><b>Rendiciones</b>: se netean contra sus reembolsos; solo la diferencia del mes entra a Ingresos (si es positiva) o Gastos (si es negativa).</li>
                 <li><b>Flujo libre</b>: Ingresos − Gastos − Pagos de deuda.</li>
               </ul>
               <p className="mt-2 text-[10px] italic text-zinc-400">

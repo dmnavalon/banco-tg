@@ -30,6 +30,19 @@ const isPagoDeuda = (m: Movimiento): boolean =>
 const isAhorroOInversion = (m: Movimiento): boolean =>
   isOperativo(m) && (m.tipoMovimiento === "Ahorro" || m.tipoMovimiento === "AporteInversión");
 
+/** Rendiciones y devoluciones: gastos hechos por cuenta de terceros (GastoPorRendir)
+ * y sus reembolsos (Devolución). No son ingreso ni gasto por sí solos — se netean
+ * por mes y solo la diferencia entra a ingresos (si es positiva) o gastos (si es
+ * negativa). */
+const isRendicion = (m: Movimiento): boolean =>
+  isOperativo(m) && (m.tipoMovimiento === "GastoPorRendir" || m.tipoMovimiento === "Devolución");
+
+/** Dirección del flujo dentro del bucket de rendiciones. Las devoluciones de
+ * compras con tarjeta vienen marcadas "Cargo" en la cartola aunque son plata
+ * que entra, por eso también se mira la descripción. */
+const esEntradaRendicion = (m: Movimiento): boolean =>
+  m.tipo === "Abono" || /DEVOLUCI[OÓ]N|REVERSA/i.test(m.descripcion);
+
 /** Egreso del MES en curso. Para compras en cuotas, esta es la cuota mensual,
  * no el total de la compra. Esto da el flujo de caja real del mes. */
 function montoEgreso(m: Movimiento): number {
@@ -47,8 +60,18 @@ function montoIngreso(m: Movimiento): number {
 
 interface AgregadoMes {
   mes: string;
+  /** Total final: operativos + neto de rendiciones si fue positivo. */
   ingresos: number;
+  /** Total final: operativos + |neto de rendiciones| si fue negativo. */
   gastosReales: number;
+  /** Solo movimientos tipoMovimiento=Ingreso (antes de sumar neto de rendiciones). */
+  ingresosOperativos: number;
+  /** Solo movimientos tipoMovimiento=GastoReal (antes de sumar neto de rendiciones). */
+  gastosRealesOperativos: number;
+  rendicionesAbonos: number;
+  rendicionesCargos: number;
+  /** Abonos − cargos de rendiciones/devoluciones del mes. */
+  rendicionesNeto: number;
   pagosDeuda: number;
   ahorroEInversion: number;
   flujoLibre: number;
@@ -59,6 +82,8 @@ interface AgregadoMes {
   // Idxs de movimientos que entraron a cada bucket
   ingresosIdxs: number[];
   gastosRealesIdxs: number[];
+  rendicionesAbonosIdxs: number[];
+  rendicionesCargosIdxs: number[];
   pagosDeudaIdxs: number[];
   ahorroEInversionIdxs: number[];
   gastoEsencialIdxs: number[];
@@ -70,9 +95,12 @@ interface AgregadoMes {
 function emptyAggregate(mes: string): AgregadoMes {
   return {
     mes,
-    ingresos: 0, gastosReales: 0, pagosDeuda: 0, ahorroEInversion: 0,
+    ingresos: 0, gastosReales: 0, ingresosOperativos: 0, gastosRealesOperativos: 0,
+    rendicionesAbonos: 0, rendicionesCargos: 0, rendicionesNeto: 0,
+    pagosDeuda: 0, ahorroEInversion: 0,
     flujoLibre: 0, gastoEsencial: 0, gastoDiscrecional: 0, gastoFijo: 0, gastoVariable: 0,
-    ingresosIdxs: [], gastosRealesIdxs: [], pagosDeudaIdxs: [], ahorroEInversionIdxs: [],
+    ingresosIdxs: [], gastosRealesIdxs: [], rendicionesAbonosIdxs: [], rendicionesCargosIdxs: [],
+    pagosDeudaIdxs: [], ahorroEInversionIdxs: [],
     gastoEsencialIdxs: [], gastoDiscrecionalIdxs: [], gastoFijoIdxs: [], gastoVariableIdxs: [],
   };
 }
@@ -102,10 +130,28 @@ function agregarPorMes(movimientos: Movimiento[]): Map<string, AgregadoMes> {
     } else if (isAhorroOInversion(m)) {
       agg.ahorroEInversion += montoEgreso(m);
       agg.ahorroEInversionIdxs.push(m.idx);
+    } else if (isRendicion(m)) {
+      if (esEntradaRendicion(m)) {
+        agg.rendicionesAbonos += montoIngreso(m);
+        agg.rendicionesAbonosIdxs.push(m.idx);
+      } else {
+        agg.rendicionesCargos += montoEgreso(m);
+        agg.rendicionesCargosIdxs.push(m.idx);
+      }
     }
   }
 
   for (const agg of map.values()) {
+    agg.ingresosOperativos = agg.ingresos;
+    agg.gastosRealesOperativos = agg.gastosReales;
+    // Neteo de rendiciones: solo la diferencia del mes entra al flujo.
+    // Si reembolsaron más de lo gastado → ingreso; si falta por cobrar → gasto.
+    agg.rendicionesNeto = agg.rendicionesAbonos - agg.rendicionesCargos;
+    if (agg.rendicionesNeto > 0) {
+      agg.ingresos += agg.rendicionesNeto;
+    } else if (agg.rendicionesNeto < 0) {
+      agg.gastosReales += -agg.rendicionesNeto;
+    }
     agg.flujoLibre = agg.ingresos - agg.gastosReales - agg.pagosDeuda;
   }
 
@@ -203,6 +249,11 @@ function calcResumen(
   const aggMes = agregados.get(mesActual);
   const ingresosNetos = aggMes?.ingresos ?? null;
   const gastosTotales = aggMes?.gastosReales ?? null;
+  const rendNeto = aggMes?.rendicionesNeto ?? 0;
+  const rendIdxs = aggMes ? [...aggMes.rendicionesAbonosIdxs, ...aggMes.rendicionesCargosIdxs] : [];
+  // Si el neto de rendiciones cayó en un bucket, sus movimientos forman parte del detalle.
+  const ingresosIdxs = aggMes ? (rendNeto > 0 ? [...aggMes.ingresosIdxs, ...rendIdxs] : aggMes.ingresosIdxs) : undefined;
+  const gastosIdxs = aggMes ? (rendNeto < 0 ? [...aggMes.gastosRealesIdxs, ...rendIdxs] : aggMes.gastosRealesIdxs) : undefined;
   const pagosDeuda = aggMes?.pagosDeuda ?? 0;
   const flujoLibre = ingresosNetos !== null && gastosTotales !== null ? ingresosNetos - gastosTotales - pagosDeuda : null;
   const ahorroEInversion = aggMes?.ahorroEInversion ?? 0;
@@ -268,17 +319,31 @@ function calcResumen(
       nombre: "Ingresos netos del mes",
       valor: ingresosNetos,
       formato: "CLP",
-      formula: `Σ movimientos del mes ${mesActual} con tipoMovimiento=Ingreso, excluyendo movimientos internos y excluidos. ${aggMes?.ingresosIdxs.length ?? 0} movimientos sumados.`,
-      breakdownIdxs: aggMes?.ingresosIdxs,
+      formula: `Σ movimientos del mes ${mesActual} con tipoMovimiento=Ingreso (sueldo, arriendos, honorarios, etc.), excluyendo movimientos internos, ventas de activos (traspaso inversión→caja, no es ingreso nuevo) y excluidos. Las rendiciones se netean contra sus reembolsos y solo la diferencia positiva del mes suma acá. ${aggMes?.ingresosIdxs.length ?? 0} movimientos de ingreso sumados${rendNeto > 0 ? ` + neto de rendiciones de ${rendIdxs.length} movimientos` : ""}.`,
+      breakdownIdxs: ingresosIdxs,
       comparaciones: ingresosNetos !== null ? comparacionesContra(ingresosNetos, agregados, mesActual, "ingresos") : undefined,
+      pasosCalculo: aggMes && rendNeto > 0
+        ? [
+            { etiqueta: "Ingresos operativos (sueldo, arriendos, etc.)", valor: aggMes.ingresosOperativos, formato: "CLP", breakdownIdxs: aggMes.ingresosIdxs },
+            { etiqueta: "+ Neto rendiciones (reembolsos − gastos rendidos)", valor: rendNeto, formato: "CLP", breakdownIdxs: rendIdxs },
+            { etiqueta: "= Ingresos netos", valor: ingresosNetos, formato: "CLP" },
+          ]
+        : undefined,
     }),
     gastosTotales: buildKpi({
       nombre: "Gastos totales del mes",
       valor: gastosTotales,
       formato: "CLP",
-      formula: `Σ del MontoMesCLP de los ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos del mes ${mesActual} con tipoMovimiento=GastoReal (excluye movs internos, pagos de TC y excluidos). Para compras en cuotas, suma la cuota del mes (Cuota a pagar) y no el total de la compra — eso refleja el flujo de caja real del mes.`,
-      breakdownIdxs: aggMes?.gastosRealesIdxs,
+      formula: `Σ del MontoMesCLP de los ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos del mes ${mesActual} con tipoMovimiento=GastoReal (excluye movs internos, pagos de TC, aportes a inversión y excluidos). Para compras en cuotas, suma la cuota del mes (Cuota a pagar) y no el total de la compra — eso refleja el flujo de caja real del mes. Las rendiciones se netean contra sus reembolsos; si quedó saldo por cobrar en el mes, esa diferencia suma acá.`,
+      breakdownIdxs: gastosIdxs,
       comparaciones: gastosTotales !== null ? comparacionesContra(gastosTotales, agregados, mesActual, "gastosReales") : undefined,
+      pasosCalculo: aggMes && rendNeto < 0
+        ? [
+            { etiqueta: "Gastos reales del mes", valor: aggMes.gastosRealesOperativos, formato: "CLP", breakdownIdxs: aggMes.gastosRealesIdxs },
+            { etiqueta: "+ Rendiciones aún no reembolsadas (neto)", valor: -rendNeto, formato: "CLP", breakdownIdxs: rendIdxs },
+            { etiqueta: "= Gastos totales", valor: gastosTotales, formato: "CLP" },
+          ]
+        : undefined,
     }),
     flujoLibre: buildKpi({
       nombre: "Flujo libre mensual",
@@ -290,8 +355,8 @@ function calcResumen(
       comparaciones: flujoLibre !== null ? comparacionesContra(flujoLibre, agregados, mesActual, "flujoLibre") : undefined,
       pasosCalculo: aggMes
         ? [
-            { etiqueta: "Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: aggMes.ingresosIdxs },
-            { etiqueta: "− Gastos totales", valor: aggMes.gastosReales, formato: "CLP", breakdownIdxs: aggMes.gastosRealesIdxs },
+            { etiqueta: "Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: ingresosIdxs },
+            { etiqueta: "− Gastos totales", valor: aggMes.gastosReales, formato: "CLP", breakdownIdxs: gastosIdxs },
             { etiqueta: "− Pagos de deuda", valor: aggMes.pagosDeuda, formato: "CLP", breakdownIdxs: aggMes.pagosDeudaIdxs },
             { etiqueta: "= Flujo libre", valor: flujoLibre, formato: "CLP" },
           ]
@@ -307,7 +372,7 @@ function calcResumen(
       pasosCalculo: aggMes
         ? [
             { etiqueta: "Ahorro + aportes a inversión", valor: aggMes.ahorroEInversion, formato: "CLP", breakdownIdxs: aggMes.ahorroEInversionIdxs },
-            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: aggMes.ingresosIdxs },
+            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: ingresosIdxs },
             { etiqueta: "= Tasa de ahorro", valor: tasaAhorro, formato: "PCT" },
           ]
         : undefined,
@@ -374,7 +439,7 @@ function calcResumen(
       pasosCalculo: pagoMensualDeuda !== null && ingresosNetos
         ? [
             { etiqueta: "Pago mensual de deuda", valor: pagoMensualDeuda, formato: "CLP", breakdownIdxs: tienePagoDeudaSnapshot ? undefined : aggMes?.pagosDeudaIdxs },
-            { etiqueta: "÷ Ingresos netos", valor: ingresosNetos, formato: "CLP", breakdownIdxs: aggMes?.ingresosIdxs },
+            { etiqueta: "÷ Ingresos netos", valor: ingresosNetos, formato: "CLP", breakdownIdxs: ingresosIdxs },
             { etiqueta: "= Endeudamiento", valor: endeudamiento, formato: "PCT" },
           ]
         : undefined,
@@ -389,7 +454,7 @@ function calcResumen(
       pasosCalculo: aggMes
         ? [
             { etiqueta: "Gasto esencial", valor: aggMes.gastoEsencial, formato: "CLP", breakdownIdxs: aggMes.gastoEsencialIdxs },
-            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: aggMes.ingresosIdxs },
+            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: ingresosIdxs },
             { etiqueta: "= % esencial", valor: gastoEsencialPct, formato: "PCT" },
           ]
         : undefined,
@@ -405,7 +470,7 @@ function calcResumen(
       pasosCalculo: aggMes
         ? [
             { etiqueta: "Gasto discrecional", valor: aggMes.gastoDiscrecional, formato: "CLP", breakdownIdxs: aggMes.gastoDiscrecionalIdxs },
-            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: aggMes.ingresosIdxs },
+            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: ingresosIdxs },
             { etiqueta: "= % discrecional", valor: gastoDiscrecionalPct, formato: "PCT" },
           ]
         : undefined,
@@ -420,7 +485,7 @@ function calcResumen(
       pasosCalculo: aggMes
         ? [
             { etiqueta: "Gasto fijo", valor: aggMes.gastoFijo, formato: "CLP", breakdownIdxs: aggMes.gastoFijoIdxs },
-            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: aggMes.ingresosIdxs },
+            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: ingresosIdxs },
             { etiqueta: "= % fijo", valor: gastoFijoPct, formato: "PCT" },
           ]
         : undefined,
@@ -434,7 +499,7 @@ function calcResumen(
       pasosCalculo: aggMes
         ? [
             { etiqueta: "Gasto variable", valor: aggMes.gastoVariable, formato: "CLP", breakdownIdxs: aggMes.gastoVariableIdxs },
-            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: aggMes.ingresosIdxs },
+            { etiqueta: "÷ Ingresos netos", valor: aggMes.ingresos, formato: "CLP", breakdownIdxs: ingresosIdxs },
             { etiqueta: "= % variable", valor: gastoVariablePct, formato: "PCT" },
           ]
         : undefined,
