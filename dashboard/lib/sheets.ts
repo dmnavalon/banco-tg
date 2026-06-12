@@ -207,7 +207,13 @@ async function readMovimientos(taxonomia: TaxonomiaRow[], warnings: string[]): P
     const recurrente = parseBool(get(r, "Recurrente"));
     const extraordinario = parseBool(get(r, "Extraordinario"));
     const excluido = parseBool(get(r, "Excluido"));
-    const tipoMovimiento = tax?.tipoMovimiento ?? (tipoStr === "Abono" ? "Ingreso" : "GastoReal");
+    // Vender un activo (ej. rescate Fintual) no es ingreso nuevo: es un
+    // traspaso inversión → caja. Se fuerza RetiroInversión aunque la taxonomía
+    // marque la categoría "Inversiones" como Ingreso.
+    const tipoMovimiento: TipoMovimiento =
+      subcategoria === "Venta de activos"
+        ? "RetiroInversión"
+        : tax?.tipoMovimiento ?? (tipoStr === "Abono" ? "Ingreso" : "GastoReal");
     const saldoRaw = get(r, "Saldo");
 
     result.push({
