@@ -576,10 +576,16 @@ def bulk_approve(
     source: Source,
     versions: dict[str, int] | None = None,
 ) -> BulkResult:
-    return _bulk_apply(
-        ids, versions,
-        lambda mid, v: approve_movement(mid, actor=actor, source=source, expected_version=v),
-    )
+    def _approve(mid: str, v: int | None):
+        # corrected_pending requiere approve_correction, no approve. El estado
+        # se re-valida dentro de la transacción de cada función, así que esta
+        # lectura previa solo decide la ruta — no introduce carrera.
+        data = db.get_movement_by_id(mid)
+        if data and data.get("review_status") == CORRECTED_PENDING:
+            return approve_corrected_movement(mid, actor=actor, source=source, expected_version=v)
+        return approve_movement(mid, actor=actor, source=source, expected_version=v)
+
+    return _bulk_apply(ids, versions, _approve)
 
 
 def bulk_categorize(

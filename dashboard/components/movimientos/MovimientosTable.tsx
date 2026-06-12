@@ -367,9 +367,15 @@ export function MovimientosTable() {
     });
     const j = await r.json().catch(() => ({}));
     if (r.ok) {
-      const okCount = Object.values(j.results ?? {}).filter((x) => (x as { status: string }).status === "ok").length;
-      const conflictCount = Object.values(j.results ?? {}).filter((x) => (x as { status: string }).status === "conflict").length;
-      showToast(`Aprobados ${okCount}/${ids.length}` + (conflictCount ? ` · ${conflictCount} conflictos` : ""));
+      const statuses = Object.values(j.results ?? {}).map((x) => (x as { status: string }).status);
+      const okCount = statuses.filter((s) => s === "ok").length;
+      const conflictCount = statuses.filter((s) => s === "conflict").length;
+      const errorCount = statuses.filter((s) => s === "error").length;
+      showToast(
+        `Aprobados ${okCount}/${ids.length}` +
+          (conflictCount ? ` · ${conflictCount} conflictos` : "") +
+          (errorCount ? ` · ${errorCount} con error` : ""),
+      );
     } else {
       showToast(`Error bulk approve: ${j.message ?? r.status}`);
     }

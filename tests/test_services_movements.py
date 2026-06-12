@@ -205,6 +205,24 @@ def test_bulk_approve_partial_failure(insert_pending, monkeypatch, fs):
     assert sync_calls == ["m1"]
 
 
+def test_bulk_approve_mixes_pending_and_corrected_pending(insert_pending, monkeypatch, fs):
+    sync_calls = _stub_sync(monkeypatch)
+    insert_pending("m1", version=1)
+    insert_pending("m2", review_status="corrected_pending", version=2)  # corregido inline
+
+    results = movements.bulk_approve(
+        ["m1", "m2"],
+        actor="diego", source="dashboard",
+        versions={"m1": 1, "m2": 2},
+    )
+
+    assert results["m1"]["status"] == "ok"
+    assert results["m1"]["movement"]["review_status"] == "approved"
+    assert results["m2"]["status"] == "ok"
+    assert results["m2"]["movement"]["review_status"] == "corrected_approved"
+    assert sync_calls == ["m1", "m2"]
+
+
 def test_bulk_categorize(insert_pending, fs):
     insert_pending("m1")
     insert_pending("m2")
