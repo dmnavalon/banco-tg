@@ -334,7 +334,7 @@ function calcResumen(
       nombre: "Gastos totales del mes",
       valor: gastosTotales,
       formato: "CLP",
-      formula: `Σ del MontoMesCLP de los ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos del mes ${mesActual} con tipoMovimiento=GastoReal (excluye movs internos, pagos de TC, aportes a inversión y excluidos). Para compras en cuotas, suma la cuota del mes (Cuota a pagar) y no el total de la compra — eso refleja el flujo de caja real del mes. Las rendiciones se netean contra sus reembolsos; si quedó saldo por cobrar en el mes, esa diferencia suma acá.`,
+      formula: `Σ del MontoMesCLP de los ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos del mes ${mesActual} con tipoMovimiento=GastoReal (excluye movs internos, pagos de TC, aportes a inversión y excluidos). Las compras en cuotas se expanden en una cuota por mes (fechada mes a mes desde la compra, hasta el mes actual), así cada mes suma su cuota (Cuota a pagar) y no el total de la compra — eso refleja el flujo de caja real del mes. Las rendiciones se netean contra sus reembolsos; si quedó saldo por cobrar en el mes, esa diferencia suma acá.`,
       breakdownIdxs: gastosIdxs,
       comparaciones: gastosTotales !== null ? comparacionesContra(gastosTotales, agregados, mesActual, "gastosReales") : undefined,
       pasosCalculo: aggMes && rendNeto < 0

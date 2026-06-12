@@ -302,7 +302,9 @@ def apply_plan(client, plan: dict, extra_rows: list[int] | None = None) -> dict:
             results["errors"].append({"op": "merge", "winner": winner_id, "err": str(e)})
             log.exception(f"Merge falló para {winner_id}")
 
-        if needs_resync and grp["winner"].get("sheet_row_id"):
+        # upsert_movement busca la fila por columna MovementId, no por
+        # sheet_row_id (que puede estar nulo o corrido) — resync siempre.
+        if needs_resync:
             resync_winners.append(winner_id)
 
         for L in grp["losers"]:
@@ -408,18 +410,34 @@ def _detect_gsheet_extra_dupes(client, plan: dict) -> list[dict]:
             continue
         grouped[(fecha, desc_norm, monto)].append((i, row))
 
+    # Ids y filas de losers ya planificados en Firestore: sus filas se borran
+    # por el plan principal, y sus MovementIds dejarán de existir — una fila
+    # que apunte a un loser nunca puede ser winner aquí.
+    planned_loser_ids = {L["id"] for g in plan["groups"] for L in g["losers"]}
+    planned_loser_rows = {
+        L["sheet_row_id"] for g in plan["groups"] for L in g["losers"]
+        if isinstance(L.get("sheet_row_id"), int)
+    }
+
     extras: list[dict] = []
     for key, rows in grouped.items():
         if len(rows) <= 1:
             continue
-        # Si solo una tiene MovementId, esa es winner. Si ninguna, la primera.
-        ids = [(idx, (r[ID] if len(r) > ID else "").lstrip("'")) for idx, r in rows]
+        # Winner: primera fila con MovementId que NO sea un loser planificado;
+        # si no hay, primera con MovementId; si ninguna, la primera.
+        ids = [(idx, (r[ID] if len(r) > ID else "").lstrip("'").strip()) for idx, r in rows]
+        surviving = [t for t in ids if t[1] and t[1] not in planned_loser_ids]
         with_id = [t for t in ids if t[1]]
-        if with_id:
+        if surviving:
+            winner_row = surviving[0][0]
+        elif with_id:
             winner_row = with_id[0][0]
         else:
             winner_row = rows[0][0]
-        losers = [idx for idx, _ in rows if idx != winner_row]
+        losers = [idx for idx, _ in rows
+                  if idx != winner_row and idx not in planned_loser_rows]
+        if not losers:
+            continue
         extras.append({
             "key": {"fecha": key[0], "desc_canon": key[1], "monto": key[2]},
             "winner_row": winner_row,
@@ -462,24 +480,8 @@ def main() -> int:
         return 0
 
     _backup_collection(client)
-    results = apply_plan(client, plan)
-
-    # Limpieza de extras del GSheet (best-effort).
-    if extras:
-        from src import gsheet
-        try:
-            sheet = gsheet._client().open_by_key(gsheet.SPREADSHEET_ID).worksheet(gsheet.SHEET_NAME)
-            rows = sorted({r for e in extras for r in e["loser_rows"]}, reverse=True)
-            for r in rows:
-                try:
-                    _delete_gsheet_row(sheet, r)
-                    results["gsheet_rows_deleted"] += 1
-                    log.info(f"GSheet DELETE row (extra) {r}")
-                    time.sleep(1.1)
-                except Exception as e:
-                    results["errors"].append({"op": "gsheet_extra", "row": r, "err": str(e)})
-        except Exception as e:
-            log.warning(f"No pude procesar extras GSheet: {e}")
+    extra_rows = sorted({r for e in extras for r in e["loser_rows"]})
+    results = apply_plan(client, plan, extra_rows=extra_rows)
 
     # Re-index: tras borrar filas, los sheet_row_id almacenados quedan corridos.
     try:
