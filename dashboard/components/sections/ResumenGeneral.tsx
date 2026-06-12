@@ -68,7 +68,7 @@ export function ResumenGeneralSection({ kpis, onKpiClick }: { kpis: DashboardKPI
                 <li><b>Flujo libre</b>: Ingresos − Gastos − Pagos de deuda.</li>
               </ul>
               <p className="mt-2 text-[10px] italic text-zinc-400">
-                Movs con Excluido=TRUE no se cuentan. Las compras en cuotas se computan en el mes que sale la cuota, no en el mes de la compra.
+                Movs con Excluido=TRUE no se cuentan. Las compras en cuotas se expanden en una cuota por mes (hasta el mes actual): cada mes computa el valor de su cuota, no el total de la compra.
               </p>
             </>
           }

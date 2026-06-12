@@ -41,6 +41,14 @@ export interface Movimiento {
   excluido: boolean;
   notas: string;
   tipoMovimiento: TipoMovimiento;
+  /** True si este movimiento es una cuota mensual generada por expandirCuotas
+   * a partir de una compra en cuotas (no existe como fila propia en el sheet). */
+  esCuotaVirtual?: boolean;
+  /** Número de cuota que representa este movimiento virtual (1..cuotasTotal). */
+  cuotaK?: number;
+  /** Total CLP de la compra original — solo en cuotas virtuales, para mostrar
+   * "Cuota k/N de $total" sin perder la referencia. */
+  montoTotalCompraCLP?: number;
 }
 
 export interface TaxonomiaRow {

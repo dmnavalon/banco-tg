@@ -46,6 +46,15 @@ export function monthKey(d: Date): string {
   return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
+export function addMonthsUTC(d: Date, n: number): Date {
+  // Suma meses clampeando el día al último del mes destino (31/01 + 1 mes →
+  // 28/02, no 03/03). Todo en UTC, consistente con parseChileanDate.
+  const y = d.getUTCFullYear();
+  const m = d.getUTCMonth() + n;
+  const lastDay = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(y, m, Math.min(d.getUTCDate(), lastDay)));
+}
+
 export function parseChileanDate(s: string | number | null | undefined): Date | null {
   if (s === null || s === undefined || s === "") return null;
   const asStr = typeof s === "number" ? String(s) : String(s).trim();

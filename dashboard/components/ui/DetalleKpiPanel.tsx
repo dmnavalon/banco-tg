@@ -252,7 +252,9 @@ export function DetalleKpiPanel({
                       {movs.map((m) => {
                         const enCuotas = m.cuotasTotal !== null && m.cuotasTotal > 1;
                         const montoEfectivo = Math.abs(m.montoMesCLP);
-                        const montoTotal = Math.abs(m.montoCLP);
+                        // En cuotas virtuales montoCLP ya es la cuota; el total
+                        // de la compra original vive en montoTotalCompraCLP.
+                        const montoTotal = Math.abs(m.montoTotalCompraCLP ?? m.montoCLP);
                         return (
                           <tr key={m.idx} className="hover:bg-zinc-50 dark:hover:bg-zinc-900/50">
                             <td className="whitespace-nowrap px-2 py-1.5 text-zinc-500">
