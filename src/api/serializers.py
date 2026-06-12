@@ -13,7 +13,7 @@ _FIELDS = (
     "confidence", "classifier_source", "tipo", "requiere_revision", "pregunta_sugerida",
     "review_status", "sheet_sync_status", "version",
     "status",  # legacy, útil para debug del dashboard
-    "comment", "ignore_reason",
+    "comment", "ignore_reason", "correction_hint",
     "decided_by", "decided_at", "corrected_by", "corrected_at",
     "last_action_source", "sheet_row_id", "sync_error_message",
     "cuotas_actual", "cuotas_total", "cuota_monto", "saldo",

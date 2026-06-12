@@ -265,6 +265,9 @@ def correct_movement(
     tipo: str | None = None,
     requiere_revision: bool | None = None,
     pregunta_sugerida: str | None = None,
+    # Texto libre que escribió el usuario para guiar la re-clasificación.
+    # Se persiste para que el dashboard pueda mostrar POR QUÉ quedó esa categoría.
+    correction_hint: str | None = None,
 ) -> dict[str, Any]:
     """pending|corrected_pending|approved|corrected_approved → corrected_pending.
 
@@ -319,6 +322,8 @@ def correct_movement(
             new_data["requiere_revision"] = requiere_revision
         if pregunta_sugerida is not None:
             new_data["pregunta_sugerida"] = pregunta_sugerida
+        if correction_hint is not None:
+            new_data["correction_hint"] = correction_hint
 
         t.update(ref, new_data)
         return {**data, **new_data}, current_review
@@ -335,7 +340,8 @@ def correct_movement(
         actor=actor,
         source=source,
         details={"final_category": updated.get("final_category"),
-                 "final_subcategory": updated.get("final_subcategory")},
+                 "final_subcategory": updated.get("final_subcategory"),
+                 **({"correction_hint": correction_hint} if correction_hint else {})},
     )
     return updated
 

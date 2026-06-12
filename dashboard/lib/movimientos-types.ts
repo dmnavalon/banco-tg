@@ -48,6 +48,7 @@ export interface Movimiento {
 
   comment: string | null;
   ignore_reason: string | null;
+  correction_hint: string | null;
 
   decided_by: string | null;
   decided_at: string | null;
