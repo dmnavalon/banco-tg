@@ -56,6 +56,31 @@ def test_list_movements_filters_by_status(api_client, insert_pending):
     assert {it["id"] for it in items} == {"m1"}
 
 
+def test_list_movements_missing_index_returns_422(api_client, monkeypatch):
+    """Si Firestore exige un índice compuesto que no existe, el endpoint debe
+    responder 422 con el mensaje (incluye el link de creación), no un 500."""
+    from google.api_core import exceptions as gax_exceptions
+
+    from src import db as _db
+
+    def _boom(**kwargs):
+        raise gax_exceptions.FailedPrecondition(
+            "The query requires an index. You can create it here: "
+            "https://console.firebase.google.com/v1/r/project/control-gastos-c53b6/firestore/indexes?create_composite=..."
+        )
+
+    monkeypatch.setattr(_db, "query_movements", _boom)
+    r = api_client.get(
+        "/api/movements?status=approved&from=2026-05-01&to=2026-05-31",
+        headers=_auth(),
+    )
+    assert r.status_code == 422
+    body = r.get_json()
+    assert body["error"] == "missing_index"
+    assert "requires an index" in body["message"]
+    assert "create_composite" in body["message"]
+
+
 def test_approve_endpoint(api_client, insert_pending):
     insert_pending("m1")
     r = api_client.post(

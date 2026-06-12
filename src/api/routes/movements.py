@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from flask import Blueprint, jsonify, request
+from google.api_core import exceptions as gax_exceptions
 
 from ... import db
 from ...services import audit, movements as movement_service
@@ -89,21 +90,28 @@ def _service_error_response(exc: Exception):
 def list_movements():
     args = request.args
     status_filter = _parse_status_param(args.get("status"))
-    rows = db.query_movements(
-        review_status=status_filter,
-        date_from=args.get("from"),
-        date_to=args.get("to"),
-        bank=args.get("bank"),
-        persona=args.get("persona"),
-        final_category=args.get("categoria"),
-        final_subcategory=args.get("subcategoria"),
-        min_amount=_parse_float(args.get("min_amount")),
-        max_amount=_parse_float(args.get("max_amount")),
-        confidence_min=_parse_float(args.get("confidence_min")),
-        description_contains=args.get("q"),
-        comercio_contains=args.get("comercio"),
-        limit=_parse_int(args.get("limit"), 100),
-    )
+    try:
+        rows = db.query_movements(
+            review_status=status_filter,
+            date_from=args.get("from"),
+            date_to=args.get("to"),
+            bank=args.get("bank"),
+            persona=args.get("persona"),
+            final_category=args.get("categoria"),
+            final_subcategory=args.get("subcategoria"),
+            min_amount=_parse_float(args.get("min_amount")),
+            max_amount=_parse_float(args.get("max_amount")),
+            confidence_min=_parse_float(args.get("confidence_min")),
+            description_contains=args.get("q"),
+            comercio_contains=args.get("comercio"),
+            limit=_parse_int(args.get("limit"), 100),
+        )
+    except gax_exceptions.FailedPrecondition as exc:
+        # Combinación de filtros que exige un índice compuesto inexistente.
+        # El mensaje de Firestore incluye el link de creación; los índices
+        # vigentes viven en firestore.indexes.json (raíz) y se despliegan con
+        # `firebase deploy --only firestore:indexes`.
+        return jsonify({"error": "missing_index", "message": str(exc)}), 422
     return jsonify({"items": [serialize_movement(r) for r in rows], "count": len(rows)})
 
 

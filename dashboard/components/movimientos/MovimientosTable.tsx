@@ -170,7 +170,16 @@ export function MovimientosTable() {
     setError(null);
     try {
       const r = await fetch(`/api/movimientos?${buildQuery()}`, { cache: "no-store" });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) {
+        let msg = `HTTP ${r.status}`;
+        try {
+          const body = await r.json();
+          if (body?.message) msg = `${msg} — ${body.message}`;
+        } catch {
+          // body no-JSON: nos quedamos con el status.
+        }
+        throw new Error(msg);
+      }
       const j = await r.json();
       setItems(j.items as Movimiento[]);
     } catch (e) {
