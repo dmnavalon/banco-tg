@@ -458,6 +458,11 @@ Sección agregada 2026-05-09. Permite revisar/aprobar/corregir/ignorar movimient
 - Reusa el Basic Auth existente de `dashboard/proxy.ts` (`DASHBOARD_PASSWORD`) para gating del frontend.
 - Activación: env vars en Vercel `NEXT_PUBLIC_ENABLE_MOVIMIENTOS_REVIEW=true`, `BACKEND_API_URL=https://<railway>.up.railway.app`, `BACKEND_API_TOKEN=<mismo token que en Railway>`.
 
+### Índices compuestos Firestore (filtros del listado)
+- `db.query_movements` combina `review_status` (==/in) y `bank` (==) con rango en `date` — Firestore exige índices compuestos para esas combinaciones. Sin ellos: `FailedPrecondition` → HTTP 500 en `/api/movements` → "Error cargando datos" en el dashboard (bug visto y arreglado 2026-06-12).
+- Definidos en `firestore.indexes.json` (raíz del proyecto): `(review_status, date)`, `(bank, date)`, `(review_status, bank, date)`. Desplegados con `firebase deploy --only firestore:indexes --project control-gastos-c53b6` (cuenta `diego.martinez@ogr.cl`).
+- Si se agrega un filtro server-side nuevo en `query_movements` (otro `.where` de igualdad junto al rango de `date`), agregar el índice al JSON y re-deployar.
+
 ### Google Sheet
 - Header extendido a 25 cols. Col 25 (Y) = `MovementId`. Lookup en `gsheet._find_existing_row` ahora prefiere `movement_id` si está; fallback al triple (fecha, desc, monto) para movs legacy. Idempotente — reintentar sync no duplica filas.
 - Una fila approved en GSheet tiene `MovementId` automáticamente desde el primer upsert post-feature. Movs legacy se backfillean con `scripts/extend_sheet_movement_id.py`.
