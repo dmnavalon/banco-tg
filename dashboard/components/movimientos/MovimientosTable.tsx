@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, SlidersHorizontal } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AddCategoryModal } from "@/components/movimientos/AddCategoryModal";
@@ -11,6 +11,7 @@ import {
 import type {
   AuditEvent,
   CategoriesResponse,
+  ManualFields,
   Movimiento,
   ReviewStatus,
 } from "@/lib/movimientos-types";
@@ -117,6 +118,18 @@ function confidenceBadge(c: number | null): { label: string; cls: string } | nul
   return { label: `🔴 ${pct}%`, cls: "text-red-700" };
 }
 
+/** Badges compactos de campos manuales activos (para la columna "Campos"). */
+function manualBadges(m: Movimiento): { label: string; cls: string; title: string }[] {
+  const out: { label: string; cls: string; title: string }[] = [];
+  if (m.excluido === true) out.push({ label: "EXCL", cls: "bg-red-100 text-red-700", title: "Excluido de KPIs" });
+  if (m.recurrente === true) out.push({ label: "REC", cls: "bg-sky-100 text-sky-700", title: "Recurrente" });
+  if (m.extraordinario === true) out.push({ label: "EXT", cls: "bg-orange-100 text-orange-700", title: "Extraordinario" });
+  if (m.esencial === true) out.push({ label: "ES", cls: "bg-emerald-100 text-emerald-700", title: "Esencial (override manual)" });
+  if (m.fijo === true) out.push({ label: "FI", cls: "bg-violet-100 text-violet-700", title: "Fijo (override manual)" });
+  if (m.notas) out.push({ label: "📝", cls: "bg-slate-100 text-slate-700", title: `Notas: ${m.notas}` });
+  return out;
+}
+
 export function MovimientosTable() {
   const [tab, setTab] = useState<TabKey>("pendientes");
   const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
@@ -127,6 +140,7 @@ export function MovimientosTable() {
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [categories, setCategories] = useState<CategoriesResponse | null>(null);
   const [comboTarget, setComboTarget] = useState<{ id: string; rect: DOMRect } | null>(null);
+  const [flagsTarget, setFlagsTarget] = useState<{ id: string; rect: DOMRect } | null>(null);
   const [pendingMutations, setPendingMutations] = useState<Set<string>>(new Set());
   const [ignoreTarget, setIgnoreTarget] = useState<{ ids: string[]; bulk: boolean } | null>(null);
   const [auditTarget, setAuditTarget] = useState<string | null>(null);
@@ -198,11 +212,14 @@ export function MovimientosTable() {
   // perder el contexto del usuario.
   const comboRef = useRef(comboTarget);
   comboRef.current = comboTarget;
+  const flagsRef = useRef(flagsTarget);
+  flagsRef.current = flagsTarget;
   useEffect(() => {
     if (!autoRefresh) return;
     const id = setInterval(() => {
       if (
         comboRef.current === null &&
+        flagsRef.current === null &&
         ignoreTarget === null &&
         auditTarget === null &&
         !bulkCategorize &&
@@ -249,7 +266,7 @@ export function MovimientosTable() {
 
   const callSingle = async (
     id: string,
-    action: "approve" | "approve-correction" | "correct" | "ignore" | "reopen" | "sync",
+    action: "approve" | "approve-correction" | "correct" | "ignore" | "reopen" | "sync" | "flags",
     payload: Record<string, unknown>,
   ): Promise<{ ok: boolean; mov?: Movimiento; err?: string; conflict?: Movimiento }> => {
     markPending(id, true);
@@ -301,6 +318,29 @@ export function MovimientosTable() {
       refresh();
     } else {
       showToast(`Error al guardar: ${res.err}`);
+    }
+  };
+
+  const onSaveFlags = async (mov: Movimiento, fields: ManualFields) => {
+    if (Object.keys(fields).length === 0) {
+      setFlagsTarget(null);
+      return;
+    }
+    const res = await callSingle(mov.id, "flags", {
+      fields,
+      version: mov.version,
+      actor: "dashboard",
+    });
+    if (res.ok && res.mov) {
+      replaceItem(res.mov);
+      setFlagsTarget(null);
+      showToast("Campos manuales guardados.");
+    } else if (res.err === "version_conflict") {
+      setFlagsTarget(null);
+      showToast("Conflicto: actualiza la tabla antes de guardar.");
+      refresh();
+    } else {
+      showToast(`Error al guardar campos: ${res.err}`);
     }
   };
 
@@ -637,6 +677,7 @@ export function MovimientosTable() {
               <th className="px-2 py-2">Instrucción IA</th>
               <th className="px-2 py-2">Persona</th>
               <th className="px-2 py-2">Comentario</th>
+              <th className="px-2 py-2">Campos</th>
               <th className="px-2 py-2">Origen</th>
               <th className="px-2 py-2">Updated</th>
               <th className="px-2 py-2">Acciones</th>
@@ -645,7 +686,7 @@ export function MovimientosTable() {
           <tbody>
             {items.length === 0 && !loading && (
               <tr>
-                <td colSpan={16} className="px-2 py-8 text-center text-slate-500">
+                <td colSpan={17} className="px-2 py-8 text-center text-slate-500">
                   Sin movimientos en esta vista.
                 </td>
               </tr>
@@ -725,6 +766,36 @@ export function MovimientosTable() {
                   <td className="px-2 py-1.5 max-w-[140px] truncate" title={m.comment ?? m.ignore_reason ?? ""}>
                     {m.comment ?? (m.ignore_reason ? `🚫 ${m.ignore_reason}` : "")}
                   </td>
+                  <td className="px-2 py-1.5">
+                    {(() => {
+                      const badges = manualBadges(m);
+                      return (
+                        <button
+                          onClick={(e) =>
+                            setFlagsTarget({ id: m.id, rect: e.currentTarget.getBoundingClientRect() })
+                          }
+                          disabled={isPending}
+                          className={`inline-flex max-w-[150px] flex-wrap items-center gap-0.5 rounded-md border px-1.5 py-1 transition disabled:opacity-50 ${
+                            badges.length > 0
+                              ? "border-slate-200 bg-white hover:bg-slate-100"
+                              : "border-dashed border-slate-300 bg-slate-50 text-slate-400 hover:bg-slate-100"
+                          }`}
+                          title="Editar campos manuales (recurrente, extraordinario, excluido, esencial, fijo, notas)"
+                        >
+                          {badges.length === 0 && <SlidersHorizontal className="h-3 w-3" />}
+                          {badges.map((b) => (
+                            <span
+                              key={b.label}
+                              title={b.title}
+                              className={`rounded px-1 py-0.5 text-[9px] font-medium ${b.cls}`}
+                            >
+                              {b.label}
+                            </span>
+                          ))}
+                        </button>
+                      );
+                    })()}
+                  </td>
                   <td className="px-2 py-1.5 text-[10px] uppercase text-slate-500">{m.last_action_source}</td>
                   <td className="px-2 py-1.5 whitespace-nowrap text-[10px] text-slate-500">
                     {m.updated_at?.slice(0, 16) ?? ""}
@@ -802,6 +873,22 @@ export function MovimientosTable() {
         />
       )}
 
+      {flagsTarget &&
+        (() => {
+          const mov = items.find((m) => m.id === flagsTarget.id);
+          if (!mov) return null;
+          return (
+            <FlagsPopover
+              key={mov.id}
+              mov={mov}
+              anchorRect={flagsTarget.rect}
+              saving={pendingMutations.has(mov.id)}
+              onSave={(fields) => onSaveFlags(mov, fields)}
+              onClose={() => setFlagsTarget(null)}
+            />
+          );
+        })()}
+
       {ignoreTarget && (
         <IgnoreModal
           count={ignoreTarget.ids.length}
@@ -857,6 +944,178 @@ export function MovimientosTable() {
 }
 
 // ── Sub-components ───────────────────────────────────────────────────────
+
+const FLAGS_POPOVER_HEIGHT = 400;
+const FLAGS_POPOVER_WIDTH = 288;
+
+/**
+ * Popover de edición de campos manuales (fuente de verdad: Firestore).
+ * - Recurrente / Extraordinario / Excluido: booleans explícitos.
+ * - Esencial / Fijo: override solo-TRUE — apagado envía null y el backend
+ *   deriva el valor por categoría (el dashboard de KPIs no soporta override FALSE).
+ * - Notas: texto libre; vacío envía null (limpia el campo).
+ * Envía únicamente los campos que cambiaron respecto del movimiento.
+ */
+function FlagsPopover({
+  mov,
+  anchorRect,
+  saving,
+  onSave,
+  onClose,
+}: {
+  mov: Movimiento;
+  anchorRect: DOMRect;
+  saving: boolean;
+  onSave: (fields: ManualFields) => void;
+  onClose: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [recurrente, setRecurrente] = useState(mov.recurrente === true);
+  const [extraordinario, setExtraordinario] = useState(mov.extraordinario === true);
+  const [excluido, setExcluido] = useState(mov.excluido === true);
+  const [esencial, setEsencial] = useState(mov.esencial === true);
+  const [fijo, setFijo] = useState(mov.fijo === true);
+  const [notas, setNotas] = useState(mov.notas ?? "");
+
+  const buildDiff = (): ManualFields => {
+    const fields: ManualFields = {};
+    if (recurrente !== (mov.recurrente === true)) fields.recurrente = recurrente;
+    if (extraordinario !== (mov.extraordinario === true)) fields.extraordinario = extraordinario;
+    if (excluido !== (mov.excluido === true)) fields.excluido = excluido;
+    if (esencial !== (mov.esencial === true)) fields.esencial = esencial ? true : null;
+    if (fijo !== (mov.fijo === true)) fields.fijo = fijo ? true : null;
+    const notasOrig = (mov.notas ?? "").trim();
+    const notasNew = notas.trim();
+    if (notasNew !== notasOrig) fields.notas = notasNew === "" ? null : notasNew;
+    return fields;
+  };
+  const dirty = Object.keys(buildDiff()).length > 0;
+
+  const placeAbove =
+    anchorRect.bottom + FLAGS_POPOVER_HEIGHT + 8 > window.innerHeight &&
+    anchorRect.top > FLAGS_POPOVER_HEIGHT + 8;
+  const maxLeft = window.innerWidth - FLAGS_POPOVER_WIDTH - 8;
+  const left = Math.max(8, Math.min(maxLeft, anchorRect.left));
+  const position = placeAbove
+    ? { bottom: window.innerHeight - anchorRect.top + 4, left }
+    : { top: anchorRect.bottom + 4, left };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    const onMouseDown = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        onClose();
+      }
+    };
+    const onScroll = (e: Event) => {
+      // No cerrar por scroll interno (p.ej. dentro del textarea de notas).
+      if (containerRef.current && e.target instanceof Node && containerRef.current.contains(e.target)) return;
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("scroll", onScroll, true);
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      ref={containerRef}
+      role="dialog"
+      aria-label="Campos manuales"
+      className="fixed z-50 w-[288px] rounded-lg border border-slate-200 bg-white shadow-xl"
+      style={position}
+    >
+      <div className="border-b border-slate-100 px-3 py-2">
+        <h3 className="text-sm font-semibold text-slate-900">Campos manuales</h3>
+        <p className="mt-0.5 truncate text-[10px] text-slate-500" title={mov.description}>
+          {formatDate(mov.date)} · {mov.description}
+        </p>
+      </div>
+      <div className="space-y-1.5 px-3 py-2">
+        <label className="flex items-center gap-2 text-xs text-slate-700">
+          <input
+            type="checkbox"
+            checked={recurrente}
+            onChange={(e) => setRecurrente(e.target.checked)}
+          />
+          Recurrente
+        </label>
+        <label className="flex items-center gap-2 text-xs text-slate-700">
+          <input
+            type="checkbox"
+            checked={extraordinario}
+            onChange={(e) => setExtraordinario(e.target.checked)}
+          />
+          Extraordinario
+        </label>
+        <label className="flex items-center gap-2 text-xs text-slate-700">
+          <input
+            type="checkbox"
+            checked={excluido}
+            onChange={(e) => setExcluido(e.target.checked)}
+          />
+          Excluido
+          <span className="text-[10px] text-slate-400">(fuera de KPIs)</span>
+        </label>
+        <div className="space-y-1.5 border-t border-slate-100 pt-2">
+          <p className="text-[10px] text-slate-400">
+            Overrides — apagado: se deriva por categoría
+          </p>
+          <label className="flex items-center gap-2 text-xs text-slate-700">
+            <input
+              type="checkbox"
+              checked={esencial}
+              onChange={(e) => setEsencial(e.target.checked)}
+            />
+            Marcar como esencial
+          </label>
+          <label className="flex items-center gap-2 text-xs text-slate-700">
+            <input
+              type="checkbox"
+              checked={fijo}
+              onChange={(e) => setFijo(e.target.checked)}
+            />
+            Marcar como fijo
+          </label>
+        </div>
+        <div className="border-t border-slate-100 pt-2">
+          <label className="text-[10px] font-medium text-slate-500" htmlFor={`notas-${mov.id}`}>
+            Notas
+          </label>
+          <textarea
+            id={`notas-${mov.id}`}
+            value={notas}
+            onChange={(e) => setNotas(e.target.value)}
+            placeholder="Notas del movimiento…"
+            className="mt-1 h-16 w-full rounded border border-slate-300 p-1.5 text-xs"
+          />
+        </div>
+      </div>
+      <div className="flex justify-end gap-2 border-t border-slate-100 px-3 py-2">
+        <button
+          onClick={onClose}
+          className="rounded border border-slate-300 px-3 py-1 text-xs hover:bg-slate-50"
+        >
+          Cancelar
+        </button>
+        <button
+          onClick={() => onSave(buildDiff())}
+          disabled={!dirty || saving}
+          className="rounded bg-blue-600 px-3 py-1 text-xs text-white hover:bg-blue-700 disabled:opacity-50"
+        >
+          {saving ? "Guardando…" : "Guardar"}
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function IgnoreModal({
   count,

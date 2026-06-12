@@ -110,6 +110,16 @@ def _common_update_fields(actor: str, source: Source) -> dict:
     }
 
 
+def _learn_best_effort(mov: dict) -> None:
+    """Aprende una regla de la decisión aprobada. Nunca propaga errores: el
+    aprendizaje es secundario a la aprobación."""
+    try:
+        from . import learning
+        learning.learn_from_decision(mov)
+    except Exception:
+        log.exception(f"learn_from_decision falló para {mov.get('id')}")
+
+
 # ── Approve ──────────────────────────────────────────────────────────────
 
 
@@ -178,6 +188,7 @@ def approve_movement(
             details={"final_category": updated.get("final_category"),
                      "final_subcategory": updated.get("final_subcategory")},
         )
+        _learn_best_effort(updated)
         from .. import screenshot_storage
         screenshot_storage.delete(mov_id)
         if not skip_sync:
@@ -235,6 +246,7 @@ def approve_corrected_movement(
             source=source,
             details={},
         )
+        _learn_best_effort(updated)
         from .. import screenshot_storage
         screenshot_storage.delete(mov_id)
         if not skip_sync:
@@ -543,6 +555,88 @@ def sync_approved_movement_to_sheet(
             details={},
         )
         return {**mov, **new_data}
+
+
+# ── Campos manuales (fuente de verdad: Firestore, 2026-06-12) ────────────
+# Antes vivían solo como columnas Q:X del Sheet que Diego editaba a mano.
+# Ahora se editan vía dashboard/API, se persisten en el doc y el sync los
+# escribe al Sheet (que pasa a ser vista). Ver gsheet._manual_cells para la
+# convención de vacíos/fallbacks que espera el dashboard al leer.
+
+# campo → validador de tipo (None siempre permitido = "volver al default").
+_MANUAL_FIELD_VALIDATORS: dict[str, Any] = {
+    "moneda": lambda v: isinstance(v, str) and v.strip().upper() in {"CLP", "USD", "UF"},
+    "monto_clp": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "esencial": lambda v: isinstance(v, bool),
+    "fijo": lambda v: isinstance(v, bool),
+    "recurrente": lambda v: isinstance(v, bool),
+    "extraordinario": lambda v: isinstance(v, bool),
+    "excluido": lambda v: isinstance(v, bool),
+    "notas": lambda v: isinstance(v, str),
+}
+
+
+def update_manual_fields(
+    mov_id: str,
+    *,
+    actor: str,
+    source: Source,
+    fields: dict[str, Any],
+    expected_version: int | None = None,
+    skip_sync: bool = False,
+) -> dict[str, Any]:
+    """Actualiza los campos manuales del movimiento sin tocar review_status.
+
+    Acepta cualquier subconjunto de _MANUAL_FIELD_VALIDATORS; valor None
+    limpia el campo (vuelve al default que el dashboard deriva). Si el mov ya
+    está aprobado, marca pending_sync y re-sincroniza la fila del Sheet para
+    que la vista refleje el cambio de inmediato; si aún está pendiente, los
+    campos viajarán al Sheet con el sync del approve."""
+    if not fields:
+        raise ValidationError("fields no puede venir vacío")
+    clean: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key not in _MANUAL_FIELD_VALIDATORS:
+            raise ValidationError(f"campo manual desconocido: {key}")
+        if value is not None and not _MANUAL_FIELD_VALIDATORS[key](value):
+            raise ValidationError(f"valor inválido para {key}: {value!r}")
+        clean[key] = value.strip().upper() if key == "moneda" and isinstance(value, str) else value
+
+    ref = db.get_movement_ref(mov_id)
+
+    def _logic(t):
+        snap = next(iter(t.get(ref)))
+        data = _ensure_exists(snap, mov_id)
+        _check_version(data, expected_version, mov_id)
+
+        new_data: dict[str, Any] = {
+            **_common_update_fields(actor, source),
+            **clean,
+            "version": _new_version(data),
+        }
+        review = data.get("review_status") or PENDING
+        if review in {APPROVED, CORRECTED_APPROVED}:
+            new_data["sheet_sync_status"] = PENDING_SYNC
+        t.update(ref, new_data)
+        return {**data, **new_data}, data.get("sheet_sync_status")
+
+    updated, prev_sync = db.run_txn(_logic)
+
+    audit.record_event(
+        movement_id=mov_id,
+        action=f"manual_fields_from_{source}",
+        prev_review_status=updated.get("review_status"),
+        new_review_status=updated.get("review_status"),
+        prev_sheet_sync_status=prev_sync,
+        new_sheet_sync_status=updated.get("sheet_sync_status"),
+        actor=actor,
+        source=source,
+        details={"fields": clean},
+    )
+
+    if not skip_sync and updated.get("review_status") in {APPROVED, CORRECTED_APPROVED}:
+        updated = sync_approved_movement_to_sheet(mov_id, actor=actor, source=source)
+    return updated
 
 
 # ── Bulk operations ──────────────────────────────────────────────────────

@@ -43,9 +43,12 @@ _DAYS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Do
 # Layout:
 #   1-13:  Datos del movimiento (gestión del bot)
 #   14-16: Metadata de cuotas (gestión del bot, vacías en compras "1/1")
-#   17-24: Columnas del dashboard del usuario (Diego). El bot las preserva en
-#          append (las deja vacías) y NUNCA las toca en update — las llena
-#          el dashboard via fórmulas o input manual.
+#   17-24: Campos manuales por movimiento (Moneda, MontoCLP, Esencial, Fijo,
+#          Recurrente, Extraordinario, Excluido, Notas). Desde 2026-06-12 la
+#          fuente de verdad es Firestore (decisión Diego: base única) y el bot
+#          los escribe en cada upsert; el Sheet es solo una vista. Celda vacía
+#          = "usar el default del dashboard": MontoCLP→Monto, Esencial/Fijo→
+#          lookup por categoría en el tab TaxonomíaExtendida, bools→false.
 #   25:    MovementId — identificador estable del documento Firestore. Se
 #          escribe en append y al sincronizar movs aprobados desde la feature
 #          "Movimientos". Permite lookup idempotente sin depender del triple
@@ -57,16 +60,12 @@ SHEET_HEADER = [
     "Descripción", "Monto", "Tipo", "Saldo",
     "Categoría", "Subcategoría",
     "Cuota actual", "Cuotas total", "Cuota a pagar",
-    # Dashboard de Diego — el bot solo append-vacío:
+    # Campos manuales (fuente: Firestore):
     "Moneda", "MontoCLP", "Esencial", "Fijo",
     "Recurrente", "Extraordinario", "Excluido", "Notas",
     # Feature Movimientos:
     "MovementId",
 ]
-
-# Última columna que el bot escribe en update. Todo lo de la col 17 en adelante
-# es del usuario y NO se toca.
-_LAST_BOT_COL = SHEET_HEADER.index("Cuota a pagar") + 1  # 16
 
 
 def _client() -> gspread.Client:
@@ -169,6 +168,34 @@ def _find_existing_row(
     return None
 
 
+def _manual_cells(mov: dict) -> list:
+    """Construye las celdas 17-24 (Moneda..Notas) desde los campos manuales del
+    documento Firestore. Convención de vacíos pensada para los fallbacks que ya
+    aplica el dashboard al leer (`dashboard/lib/sheets.ts`):
+
+    - MontoCLP vacío → el dashboard usa Monto.
+    - Esencial/Fijo vacíos → el dashboard deriva por categoría desde el tab
+      TaxonomíaExtendida. Solo un override explícito TRUE se escribe (el
+      dashboard hace `parseBool(celda) || taxonomía`, así que un FALSE escrito
+      no puede vencer a la taxonomía — no fingimos que sí).
+    - Recurrente/Extraordinario/Excluido: TRUE o vacío (vacío parsea false).
+    """
+    def true_or_empty(v) -> str:
+        return "TRUE" if v else ""
+
+    monto_clp = mov.get("monto_clp")
+    return [
+        mov.get("moneda") or "CLP",                      # 17. Moneda
+        monto_clp if monto_clp is not None else "",      # 18. MontoCLP
+        true_or_empty(mov.get("esencial")),              # 19. Esencial
+        true_or_empty(mov.get("fijo")),                  # 20. Fijo
+        true_or_empty(mov.get("recurrente")),            # 21. Recurrente
+        true_or_empty(mov.get("extraordinario")),        # 22. Extraordinario
+        true_or_empty(mov.get("excluido")),              # 23. Excluido
+        _safe_text(mov.get("notas") or ""),              # 24. Notas
+    ]
+
+
 def _normalize_persona(raw: str | None) -> str:
     """Devuelve 'Titular' o 'Adicional'. Si raw es un nombre propio, asume 'Adicional'.
     Si es None o vacío, default 'Titular'."""
@@ -243,32 +270,18 @@ def upsert_movement(mov: dict) -> None:
         existing_row = _find_existing_row(sheet, fecha, descripcion, monto_abs, movement_id=mov_id)
 
         if existing_row:
-            # Update SOLO de las cols del bot: Categoría (L), Subcategoría (M),
-            # Cuota actual (N), Cuotas total (O), Cuota a pagar (P). Las cols
-            # 17-24 (Moneda, MontoCLP, Esencial, etc.) son del dashboard del
-            # usuario — NO se tocan, preservan cualquier fórmula o valor manual.
+            # Update de todo lo que es propiedad de Firestore: Categoría (L),
+            # Subcategoría (M), cuotas (N:P), campos manuales (Q:X) y
+            # MovementId (Y). Las cols A:K son inmutables (se escriben solo en
+            # append: fecha/desc/monto no cambian nunca).
             sheet.update(
-                f"L{existing_row}:P{existing_row}",
-                [[cat, sub, cuota_actual_cell, cuotas_total_cell, cuota_pagar_cell]],
+                f"L{existing_row}:{_LETTER_MOVEMENT_ID}{existing_row}",
+                [[cat, sub, cuota_actual_cell, cuotas_total_cell, cuota_pagar_cell,
+                  *_manual_cells(mov), mov_id or ""]],
                 value_input_option="USER_ENTERED",
             )
-            # Completar col Y (MovementId) si está vacía. Esto backfillea el id
-            # automáticamente la primera vez que un movimiento legacy se actualiza
-            # — no necesita un script de backfill adicional para esos casos.
-            if mov_id:
-                try:
-                    cell_range = f"{_LETTER_MOVEMENT_ID}{existing_row}"
-                    current = sheet.acell(cell_range).value or ""
-                    if not current.strip():
-                        sheet.update(cell_range, [[mov_id]], value_input_option="RAW")
-                except Exception as e:
-                    # No bloqueamos el upsert si el backfill del id falla.
-                    log.warning(f"No pude backfillar MovementId en row {existing_row}: {e}")
             log.info(f"GSheet UPDATE row {existing_row}: {fecha} · {descripcion[:40]} → {cat}/{sub}")
         else:
-            # Append: las cols 17-24 (dashboard del usuario) van vacías. Si tu
-            # dashboard tiene fórmulas (ej. =F2 = Banco) que se autoaplican a
-            # filas nuevas, se siguen evaluando porque las cols 1-13 sí están.
             row = [
                 fecha,                                         # 1.  Fecha (DD/MM/YYYY)
                 dia,                                           # 2.  Día (número)
@@ -286,8 +299,7 @@ def upsert_movement(mov: dict) -> None:
                 cuota_actual_cell,                             # 14. Cuota actual
                 cuotas_total_cell,                             # 15. Cuotas total
                 cuota_pagar_cell,                              # 16. Cuota a pagar
-                # 17-24 (dashboard del usuario): el bot deja vacío.
-                "", "", "", "", "", "", "", "",
+                *_manual_cells(mov),                           # 17-24. Campos manuales (Firestore)
                 mov_id or "",                                  # 25. MovementId
             ]
             sheet.append_row(row, value_input_option="USER_ENTERED")

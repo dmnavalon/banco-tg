@@ -234,6 +234,31 @@ def reopen(mov_id: str):
     return jsonify({"movement": serialize_movement(updated)})
 
 
+@bp.post("/<mov_id>/flags")
+@require_token
+def update_flags(mov_id: str):
+    """Edita los campos manuales (moneda, monto_clp, esencial, fijo,
+    recurrente, extraordinario, excluido, notas) sin tocar review_status.
+    Payload: {"fields": {...}, "version": n, "actor": "..."}. Un valor null
+    limpia el campo (el dashboard vuelve a derivar su default)."""
+    payload = request.get_json(silent=True) or {}
+    fields = payload.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        return jsonify({"error": "validation_error", "message": "fields (dict) requerido"}), 422
+    actor = payload.get("actor") or "dashboard"
+    try:
+        updated = movement_service.update_manual_fields(
+            mov_id,
+            actor=actor,
+            source="dashboard",
+            fields=fields,
+            expected_version=_expected_version(payload),
+        )
+    except Exception as e:
+        return _service_error_response(e)
+    return jsonify({"movement": serialize_movement(updated)})
+
+
 @bp.post("/<mov_id>/sync")
 @require_token
 def retry_sync(mov_id: str):
