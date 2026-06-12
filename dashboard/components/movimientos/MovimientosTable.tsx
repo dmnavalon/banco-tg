@@ -634,6 +634,7 @@ export function MovimientosTable() {
               <th className="px-2 py-2">Tipo</th>
               <th className="px-2 py-2">Categoría → Sub</th>
               <th className="px-2 py-2">IA</th>
+              <th className="px-2 py-2">Instrucción IA</th>
               <th className="px-2 py-2">Persona</th>
               <th className="px-2 py-2">Comentario</th>
               <th className="px-2 py-2">Origen</th>
@@ -644,7 +645,7 @@ export function MovimientosTable() {
           <tbody>
             {items.length === 0 && !loading && (
               <tr>
-                <td colSpan={15} className="px-2 py-8 text-center text-slate-500">
+                <td colSpan={16} className="px-2 py-8 text-center text-slate-500">
                   Sin movimientos en esta vista.
                 </td>
               </tr>
@@ -716,6 +717,9 @@ export function MovimientosTable() {
                   </td>
                   <td className="px-2 py-1.5 whitespace-nowrap">
                     {c && <span className={c.cls}>{c.label}</span>}
+                  </td>
+                  <td className="px-2 py-1.5 max-w-[180px] truncate text-slate-600 italic" title={m.correction_hint ?? ""}>
+                    {m.correction_hint ? `«${m.correction_hint}»` : ""}
                   </td>
                   <td className="px-2 py-1.5 text-slate-600">{m.persona ?? ""}</td>
                   <td className="px-2 py-1.5 max-w-[140px] truncate" title={m.comment ?? m.ignore_reason ?? ""}>

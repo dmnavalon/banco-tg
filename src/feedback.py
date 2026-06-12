@@ -132,6 +132,7 @@ def apply(text: str, chat_id: str) -> str:
             tipo=cls.tipo or mov.get("tipo"),
             requiere_revision=cls.requiere_revision,
             pregunta_sugerida=cls.pregunta_sugerida,
+            correction_hint=rest,
         )
     except ServiceError as e:
         log.exception(f"feedback correct {mov_id} falló")

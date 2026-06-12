@@ -649,6 +649,7 @@ def _handle_correction_reply(text: str, chat_id: str, pending: dict, prompt_msg_
             tipo=cls.tipo or mov.get("tipo"),
             requiere_revision=cls.requiere_revision,
             pregunta_sugerida=cls.pregunta_sugerida,
+            correction_hint=text,
         )
     except ServiceError as e:
         log.exception(f"correct {mov_id} falló")
