@@ -631,14 +631,17 @@ def find_rule_for(description: str) -> dict | None:
         d["id"] = docs[0].id
         return d
 
-    # Contains match: traemos todas y filtramos en Python
+    # Contains match: traemos todas y filtramos en Python. Gana el patrón más
+    # largo (más específico): "uber eats" debe vencer a "uber" aunque la regla
+    # genérica tenga más hits. Hits solo desempata entre patrones del mismo largo.
     docs = db.collection("rules").where("match_type", "==", "contains").get()
     best: dict | None = None
     for doc in docs:
         rule = doc.to_dict()
         rule["id"] = doc.id
         if rule.get("pattern") and rule["pattern"] in norm_desc:
-            if best is None or rule.get("hits", 0) > best.get("hits", 0):
+            key = (len(rule["pattern"]), rule.get("hits", 0))
+            if best is None or key > (len(best["pattern"]), best.get("hits", 0)):
                 best = rule
     return best
 
@@ -663,6 +666,46 @@ def add_rule(*, match_type: str, pattern: str, category: str, subcategory: str |
     )
     if existing:
         return None
+    ref = db.collection("rules").document()
+    ref.set({
+        "match_type": match_type,
+        "pattern": pattern,
+        "category": category,
+        "subcategory": subcategory,
+        "hits": 0,
+        "created_at": _now(),
+        "last_used_at": None,
+    })
+    return ref.id
+
+
+def upsert_rule(*, match_type: str, pattern: str, category: str, subcategory: str | None) -> str | None:
+    """Crea o actualiza la regla para (match_type, pattern). A diferencia de
+    `add_rule`, deduplica por patrón SIN incluir la categoría en el filtro:
+    si el usuario cambió de opinión sobre un comercio, la regla existente se
+    corrige en vez de crear una segunda regla contradictoria con el mismo
+    patrón. Al corregir se resetean los hits (estaban inflados por usos de la
+    categoría equivocada)."""
+    db = _db()
+    existing = (
+        db.collection("rules")
+        .where("match_type", "==", match_type)
+        .where("pattern", "==", pattern)
+        .limit(1)
+        .get()
+    )
+    if existing:
+        doc = existing[0]
+        cur = doc.to_dict() or {}
+        if cur.get("category") == category and cur.get("subcategory") == subcategory:
+            return doc.id
+        doc.reference.update({
+            "category": category,
+            "subcategory": subcategory,
+            "hits": 0,
+            "updated_at": _now(),
+        })
+        return doc.id
     ref = db.collection("rules").document()
     ref.set({
         "match_type": match_type,
