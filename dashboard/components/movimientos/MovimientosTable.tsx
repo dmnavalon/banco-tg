@@ -1,7 +1,24 @@
 "use client";
 
-import { ChevronDown, SlidersHorizontal } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Check,
+  ChevronDown,
+  ChevronsUpDown,
+  ListTree,
+  RefreshCw,
+  RotateCcw,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
+import {
+  type MouseEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { AddCategoryModal } from "@/components/movimientos/AddCategoryModal";
 import {
@@ -47,6 +64,7 @@ interface Filters {
   comercio: string;
   persona: string;
   categoria: string;
+  tipo: string;
 }
 
 const EMPTY_FILTERS: Filters = {
@@ -60,7 +78,14 @@ const EMPTY_FILTERS: Filters = {
   comercio: "",
   persona: "",
   categoria: "",
+  tipo: "",
 };
+
+type SortKey = "estado" | "date" | "amount" | "confidence";
+interface SortState {
+  key: SortKey;
+  dir: 1 | -1;
+}
 
 function formatCLP(amount: number | null): string {
   if (amount === null || Number.isNaN(amount)) return "—";
@@ -151,6 +176,14 @@ export function MovimientosTable() {
     suggestedSub: string;
   } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [sort, setSort] = useState<SortState | null>(null);
+
+  // Orden client-side sobre el set ya cargado. Click en header: 1º asc, 2º desc.
+  const toggleSort = (key: SortKey) => {
+    setSort((prev) =>
+      prev?.key === key ? { key, dir: prev.dir === 1 ? -1 : 1 } : { key, dir: 1 },
+    );
+  };
 
   const reloadCategories = useCallback(() => {
     fetch("/api/categorias")
@@ -159,6 +192,20 @@ export function MovimientosTable() {
         if (j) setCategories(j);
       })
       .catch(() => {});
+  }, []);
+
+  // Prefiltrado vía URL (?tab=todos&tipo=Ingreso&from=2026-06-01&to=2026-06-30…),
+  // usado por las tarjetas del dashboard que abren esta vista en otra pestaña.
+  useEffect(() => {
+    const sp = new URLSearchParams(window.location.search);
+    const t = sp.get("tab");
+    if (t && t in TAB_LABELS) setTab(t as TabKey);
+    const init: Partial<Filters> = {};
+    for (const k of Object.keys(EMPTY_FILTERS) as (keyof Filters)[]) {
+      const v = sp.get(k);
+      if (v) init[k] = v;
+    }
+    if (Object.keys(init).length > 0) setFilters((f) => ({ ...f, ...init }));
   }, []);
 
   // Carga taxonomía una vez al montar.
@@ -174,7 +221,8 @@ export function MovimientosTable() {
     sp.set("status", TAB_TO_FILTER[tab]);
     sp.set("limit", "200");
     for (const [k, v] of Object.entries(filters)) {
-      if (v) sp.set(k, v);
+      // "tipo" se filtra client-side: el backend no soporta ese parámetro.
+      if (v && k !== "tipo") sp.set(k, v);
     }
     return sp.toString();
   }, [tab, filters]);
@@ -240,11 +288,33 @@ export function MovimientosTable() {
     });
   };
 
+  // Tipo se filtra acá (no en el backend).
+  const visible = filters.tipo ? items.filter((m) => m.tipo === filters.tipo) : items;
+
+  const sortedVisible = useMemo(() => {
+    if (!sort) return visible;
+    const { key, dir } = sort;
+    const val = (m: Movimiento): string | number =>
+      key === "estado"
+        ? m.review_status
+        : key === "date"
+          ? m.date ?? ""
+          : key === "amount"
+            ? m.amount ?? 0
+            : m.confidence ?? -1;
+    return [...visible].sort((a, b) => {
+      const va = val(a);
+      const vb = val(b);
+      if (typeof va === "number" && typeof vb === "number") return (va - vb) * dir;
+      return String(va).localeCompare(String(vb)) * dir;
+    });
+  }, [visible, sort]);
+
   const toggleSelectAll = () => {
-    if (selected.size === items.length) {
+    if (selected.size === visible.length) {
       setSelected(new Set());
     } else {
-      setSelected(new Set(items.map((m) => m.id)));
+      setSelected(new Set(visible.map((m) => m.id)));
     }
   };
 
@@ -577,6 +647,16 @@ export function MovimientosTable() {
             className="rounded border border-slate-300 px-2 py-1 text-sm"
           />
           <select
+            value={filters.tipo}
+            onChange={(e) => setFilters({ ...filters, tipo: e.target.value })}
+            className="rounded border border-slate-300 px-2 py-1 text-sm"
+          >
+            <option value="">Tipo (todos)</option>
+            <option value="Ingreso">Ingreso</option>
+            <option value="Egreso">Egreso</option>
+            <option value="Transferencia interna">Transferencia interna</option>
+          </select>
+          <select
             value={filters.categoria}
             onChange={(e) => setFilters({ ...filters, categoria: e.target.value })}
             className="rounded border border-slate-300 px-2 py-1 text-sm"
@@ -655,43 +735,33 @@ export function MovimientosTable() {
 
       {/* Tabla */}
       <div className="relative max-h-[calc(100vh-300px)] min-h-[300px] overflow-auto rounded border border-slate-200 bg-white">
-        <table className="w-full text-xs">
-          <thead className="sticky top-0 z-10 bg-slate-50 text-left text-slate-600 shadow-[0_1px_0_0_rgb(226_232_240)]">
+        <table className="w-full min-w-[900px] text-xs">
+          <thead className="sticky top-0 z-10 bg-slate-50 text-left text-[11px] uppercase tracking-wide text-slate-500 shadow-[0_1px_0_0_rgb(226_232_240)]">
             <tr>
               <th className="w-8 px-2 py-2">
                 <input
                   type="checkbox"
-                  checked={items.length > 0 && selected.size === items.length}
+                  checked={visible.length > 0 && selected.size === visible.length}
                   onChange={toggleSelectAll}
                 />
               </th>
-              <th className="px-2 py-2">Estado</th>
-              <th className="px-2 py-2">Fecha</th>
-              <th className="px-2 py-2">Banco</th>
-              <th className="px-2 py-2">Texto original</th>
-              <th className="px-2 py-2">Comercio</th>
-              <th className="px-2 py-2 text-right">Monto</th>
-              <th className="px-2 py-2">Tipo</th>
-              <th className="px-2 py-2">Categoría → Sub</th>
-              <th className="px-2 py-2">IA</th>
-              <th className="px-2 py-2">Instrucción IA</th>
-              <th className="px-2 py-2">Persona</th>
-              <th className="px-2 py-2">Comentario</th>
-              <th className="px-2 py-2">Campos</th>
-              <th className="px-2 py-2">Origen</th>
-              <th className="px-2 py-2">Updated</th>
-              <th className="px-2 py-2">Acciones</th>
+              <SortTh label="Estado" sortKey="estado" sort={sort} onSort={toggleSort} className="min-w-[104px]" />
+              <SortTh label="Fecha" sortKey="date" sort={sort} onSort={toggleSort} className="min-w-[64px]" />
+              <th className="min-w-[260px] px-2 py-2">Movimiento</th>
+              <SortTh label="Monto" sortKey="amount" sort={sort} onSort={toggleSort} className="min-w-[96px]" align="right" />
+              <th className="min-w-[170px] px-2 py-2">Categoría</th>
+              <th className="min-w-[150px] px-2 py-2 text-right">Acciones</th>
             </tr>
           </thead>
           <tbody>
-            {items.length === 0 && !loading && (
+            {visible.length === 0 && !loading && (
               <tr>
-                <td colSpan={17} className="px-2 py-8 text-center text-slate-500">
+                <td colSpan={7} className="px-2 py-8 text-center text-slate-500">
                   Sin movimientos en esta vista.
                 </td>
               </tr>
             )}
-            {items.map((m) => {
+            {sortedVisible.map((m) => {
               const r = reviewBadge(m.review_status);
               const s = syncBadge(m.sheet_sync_status);
               const c = confidenceBadge(m.confidence);
@@ -699,50 +769,88 @@ export function MovimientosTable() {
               const isPending = pendingMutations.has(m.id);
               const cat = m.final_category ?? m.suggested_category ?? "";
               const sub = m.final_subcategory ?? m.suggested_subcategory ?? "";
+              const comercio = m.comercio_final ?? m.comercio ?? "";
               const ignored = m.review_status === "ignored";
               const approved = m.review_status === "approved" || m.review_status === "corrected_approved";
+              const badges = manualBadges(m);
+              // Movimiento en dos líneas: comercio — descripción arriba, metadata
+              // abajo. El tooltip de cada línea entrega el texto completo, así la
+              // tabla se mantiene angosta sin perder información.
+              const line1 = comercio ? `${comercio} — ${m.description}` : m.description;
+              const metaShort = [
+                c?.label,
+                m.bank,
+                m.persona,
+                m.last_action_source,
+                m.updated_at?.slice(0, 16),
+                s?.label,
+              ]
+                .filter(Boolean)
+                .join(" · ");
+              const metaFull = [
+                metaShort,
+                m.tipo ? `Tipo: ${m.tipo}` : "",
+                m.correction_hint ? `IA: «${m.correction_hint}»` : "",
+                m.comment ? `Comentario: ${m.comment}` : "",
+                m.ignore_reason ? `Ignorado: ${m.ignore_reason}` : "",
+              ]
+                .filter(Boolean)
+                .join(" · ");
               return (
                 <tr
                   key={m.id}
                   className={`border-b border-slate-100 ${isSelected ? "bg-blue-50/40" : "hover:bg-slate-50"}`}
                 >
-                  <td className="px-2 py-1.5">
+                  <td className="px-2 py-1.5 align-top">
                     <input
                       type="checkbox"
                       checked={isSelected}
                       onChange={() => toggleSelected(m.id)}
                     />
                   </td>
-                  <td className="px-2 py-1.5">
+                  <td className="px-2 py-1.5 align-top">
                     <div className="flex flex-col gap-0.5">
-                      <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-medium ${r.cls}`}>
+                      <span className={`inline-block w-fit rounded px-1.5 py-0.5 text-[10px] font-medium ${r.cls}`}>
                         {r.label}
                       </span>
                       {s && (
-                        <span className={`inline-block rounded px-1.5 py-0.5 text-[10px] ${s.cls}`}>
+                        <span className={`inline-block w-fit rounded px-1.5 py-0.5 text-[10px] ${s.cls}`}>
                           {s.label}
                         </span>
                       )}
                     </div>
                   </td>
-                  <td className="px-2 py-1.5 whitespace-nowrap text-slate-700">{formatDate(m.date)}</td>
-                  <td className="px-2 py-1.5 capitalize text-slate-700">{m.bank}</td>
-                  <td className="px-2 py-1.5 max-w-[260px] truncate" title={m.description}>
-                    {m.description}
+                  <td className="px-2 py-1.5 align-top whitespace-nowrap text-slate-700">{formatDate(m.date)}</td>
+                  <td className="max-w-[360px] px-2 py-1.5 align-top">
+                    <Tip text={m.description} className="block max-w-full truncate font-medium text-slate-900">
+                      {line1}
+                    </Tip>
+                    <Tip text={metaFull} className="mt-0.5 block max-w-full truncate text-[11px] capitalize text-slate-400">
+                      {metaShort}
+                    </Tip>
+                    {badges.length > 0 && (
+                      <div className="mt-1 flex flex-wrap gap-0.5">
+                        {badges.map((b) => (
+                          <span
+                            key={b.label}
+                            title={b.title}
+                            className={`rounded px-1 py-0.5 text-[9px] font-medium ${b.cls}`}
+                          >
+                            {b.label}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </td>
-                  <td className="px-2 py-1.5 max-w-[140px] truncate text-slate-600" title={m.comercio_final ?? m.comercio ?? ""}>
-                    {m.comercio_final ?? m.comercio ?? ""}
-                  </td>
-                  <td className="px-2 py-1.5 text-right whitespace-nowrap font-mono">
+                  <td className="px-2 py-1.5 align-top text-right whitespace-nowrap font-mono">
                     {formatCLP(m.amount)}
                   </td>
-                  <td className="px-2 py-1.5 text-slate-700">{m.tipo ?? ""}</td>
-                  <td className="px-2 py-1.5">
+                  <td className="px-2 py-1.5 align-top">
                     <button
                       onClick={(e) =>
                         setComboTarget({ id: m.id, rect: e.currentTarget.getBoundingClientRect() })
                       }
-                      className={`group inline-flex max-w-[200px] items-center gap-1 rounded-md border px-2 py-1 text-left text-xs transition ${
+                      className={`group inline-flex max-w-[160px] items-center gap-1 rounded-md border px-2 py-1 text-left text-xs transition ${
                         cat
                           ? "border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100"
                           : "border-dashed border-slate-300 bg-slate-50 text-slate-500 hover:bg-slate-100"
@@ -756,95 +864,50 @@ export function MovimientosTable() {
                       <ChevronDown className="h-3 w-3 shrink-0 opacity-60 group-hover:opacity-100" />
                     </button>
                   </td>
-                  <td className="px-2 py-1.5 whitespace-nowrap">
-                    {c && <span className={c.cls}>{c.label}</span>}
-                  </td>
-                  <td className="px-2 py-1.5 max-w-[180px] truncate text-slate-600 italic" title={m.correction_hint ?? ""}>
-                    {m.correction_hint ? `«${m.correction_hint}»` : ""}
-                  </td>
-                  <td className="px-2 py-1.5 text-slate-600">{m.persona ?? ""}</td>
-                  <td className="px-2 py-1.5 max-w-[140px] truncate" title={m.comment ?? m.ignore_reason ?? ""}>
-                    {m.comment ?? (m.ignore_reason ? `🚫 ${m.ignore_reason}` : "")}
-                  </td>
-                  <td className="px-2 py-1.5">
-                    {(() => {
-                      const badges = manualBadges(m);
-                      return (
-                        <button
-                          onClick={(e) =>
-                            setFlagsTarget({ id: m.id, rect: e.currentTarget.getBoundingClientRect() })
-                          }
-                          disabled={isPending}
-                          className={`inline-flex max-w-[150px] flex-wrap items-center gap-0.5 rounded-md border px-1.5 py-1 transition disabled:opacity-50 ${
-                            badges.length > 0
-                              ? "border-slate-200 bg-white hover:bg-slate-100"
-                              : "border-dashed border-slate-300 bg-slate-50 text-slate-400 hover:bg-slate-100"
-                          }`}
-                          title="Editar campos manuales (recurrente, extraordinario, excluido, esencial, fijo, notas)"
-                        >
-                          {badges.length === 0 && <SlidersHorizontal className="h-3 w-3" />}
-                          {badges.map((b) => (
-                            <span
-                              key={b.label}
-                              title={b.title}
-                              className={`rounded px-1 py-0.5 text-[9px] font-medium ${b.cls}`}
-                            >
-                              {b.label}
-                            </span>
-                          ))}
-                        </button>
-                      );
-                    })()}
-                  </td>
-                  <td className="px-2 py-1.5 text-[10px] uppercase text-slate-500">{m.last_action_source}</td>
-                  <td className="px-2 py-1.5 whitespace-nowrap text-[10px] text-slate-500">
-                    {m.updated_at?.slice(0, 16) ?? ""}
-                  </td>
-                  <td className="px-2 py-1.5">
-                    <div className="flex flex-wrap gap-1">
+                  <td className="px-2 py-1.5 align-top">
+                    <div className="flex items-center justify-end gap-1">
                       {!approved && !ignored && (
-                        <button
-                          onClick={() => onApprove(m)}
-                          disabled={isPending}
-                          className="rounded bg-emerald-600 px-2 py-0.5 text-[10px] text-white hover:bg-emerald-700 disabled:opacity-50"
-                        >
-                          Aprobar
-                        </button>
+                        <IconBtn onClick={() => onApprove(m)} disabled={isPending} title="Aprobar" tone="ok">
+                          <Check className="h-3.5 w-3.5" />
+                        </IconBtn>
                       )}
                       {!ignored && (
-                        <button
+                        <IconBtn
                           onClick={() => setIgnoreTarget({ ids: [m.id], bulk: false })}
                           disabled={isPending}
-                          className="rounded bg-slate-600 px-2 py-0.5 text-[10px] text-white hover:bg-slate-700 disabled:opacity-50"
+                          title="Ignorar"
+                          tone="no"
                         >
-                          Ignorar
-                        </button>
+                          <X className="h-3.5 w-3.5" />
+                        </IconBtn>
                       )}
                       {(approved || ignored) && (
-                        <button
-                          onClick={() => onReopen(m)}
-                          disabled={isPending}
-                          className="rounded border border-slate-300 px-2 py-0.5 text-[10px] hover:bg-slate-50 disabled:opacity-50"
-                        >
-                          Reabrir
-                        </button>
+                        <IconBtn onClick={() => onReopen(m)} disabled={isPending} title="Reabrir">
+                          <RotateCcw className="h-3.5 w-3.5" />
+                        </IconBtn>
                       )}
                       {m.sheet_sync_status === "sync_error" && (
-                        <button
+                        <IconBtn
                           onClick={() => onRetrySync(m)}
                           disabled={isPending}
-                          className="rounded bg-amber-500 px-2 py-0.5 text-[10px] text-white hover:bg-amber-600 disabled:opacity-50"
-                          title={m.sync_error_message ?? ""}
+                          title={m.sync_error_message ?? "Reintentar sync"}
+                          tone="warn"
                         >
-                          Reintentar sync
-                        </button>
+                          <RefreshCw className="h-3.5 w-3.5" />
+                        </IconBtn>
                       )}
-                      <button
-                        onClick={() => setAuditTarget(m.id)}
-                        className="rounded border border-slate-300 px-2 py-0.5 text-[10px] hover:bg-slate-50"
+                      <IconBtn
+                        onClick={(e) =>
+                          setFlagsTarget({ id: m.id, rect: e.currentTarget.getBoundingClientRect() })
+                        }
+                        disabled={isPending}
+                        title="Campos manuales (recurrente, extraordinario, excluido, esencial, fijo, notas)"
                       >
-                        Audit
-                      </button>
+                        <SlidersHorizontal className="h-3.5 w-3.5" />
+                      </IconBtn>
+                      <IconBtn onClick={() => setAuditTarget(m.id)} title="Auditoría">
+                        <ListTree className="h-3.5 w-3.5" />
+                      </IconBtn>
                     </div>
                   </td>
                 </tr>
@@ -945,6 +1008,145 @@ export function MovimientosTable() {
 
 // ── Sub-components ───────────────────────────────────────────────────────
 
+/** Header de columna ordenable. */
+function SortTh({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  className,
+  align,
+}: {
+  label: string;
+  sortKey: SortKey;
+  sort: SortState | null;
+  onSort: (k: SortKey) => void;
+  className?: string;
+  align?: "right";
+}) {
+  const active = sort?.key === sortKey;
+  return (
+    <th className={`px-2 py-2 ${className ?? ""}`}>
+      <button
+        onClick={() => onSort(sortKey)}
+        className={`flex w-full items-center gap-1 uppercase tracking-wide hover:text-slate-800 ${
+          align === "right" ? "justify-end" : ""
+        } ${active ? "text-slate-800" : ""}`}
+      >
+        {label}
+        {!active ? (
+          <ChevronsUpDown className="h-3 w-3 opacity-30" />
+        ) : sort!.dir === 1 ? (
+          <ChevronDown className="h-3 w-3 rotate-180 text-blue-600" />
+        ) : (
+          <ChevronDown className="h-3 w-3 text-blue-600" />
+        )}
+      </button>
+    </th>
+  );
+}
+
+/** Botón de acción compacto e iconográfico. */
+function IconBtn({
+  children,
+  onClick,
+  disabled,
+  title,
+  tone,
+}: {
+  children: ReactNode;
+  onClick: (e: MouseEvent<HTMLButtonElement>) => void;
+  disabled?: boolean;
+  title: string;
+  tone?: "ok" | "no" | "warn";
+}) {
+  const toneCls =
+    tone === "ok"
+      ? "border-emerald-200 text-emerald-700 hover:bg-emerald-50"
+      : tone === "no"
+        ? "border-slate-200 text-slate-500 hover:bg-red-50 hover:text-red-700"
+        : tone === "warn"
+          ? "border-amber-200 text-amber-600 hover:bg-amber-50"
+          : "border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-slate-800";
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      aria-label={title}
+      className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md border bg-white transition disabled:opacity-40 ${toneCls}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+/**
+ * Texto con tooltip: hover en desktop, tap en mobile. El globo se posiciona
+ * fixed (escapa del overflow de la tabla) calculando el rect del ancla.
+ */
+function Tip({
+  text,
+  children,
+  className,
+}: {
+  text: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  // Mobile: tap fuera del ancla cierra el tooltip.
+  useEffect(() => {
+    if (!pos) return;
+    const onDoc = (e: globalThis.MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setPos(null);
+    };
+    document.addEventListener("click", onDoc);
+    return () => document.removeEventListener("click", onDoc);
+  }, [pos]);
+
+  if (!text) return <span className={className}>{children}</span>;
+
+  const open = () => {
+    const rect = ref.current?.getBoundingClientRect();
+    if (rect) {
+      setPos({
+        top: rect.bottom + 6,
+        left: Math.min(rect.left, window.innerWidth - 300),
+      });
+    }
+  };
+  const close = () => setPos(null);
+
+  return (
+    <>
+      <span
+        ref={ref}
+        className={`${className ?? ""} cursor-help`}
+        onMouseEnter={open}
+        onMouseLeave={close}
+        onClick={(e) => {
+          e.stopPropagation();
+          pos ? close() : open();
+        }}
+      >
+        {children}
+      </span>
+      {pos && (
+        <div
+          role="tooltip"
+          className="fixed z-50 max-w-[280px] rounded-lg bg-slate-900 px-3 py-2 text-[11px] normal-case leading-relaxed text-white shadow-xl"
+          style={{ top: pos.top, left: Math.max(8, pos.left) }}
+        >
+          {text}
+        </div>
+      )}
+    </>
+  );
+}
+
 const FLAGS_POPOVER_HEIGHT = 400;
 const FLAGS_POPOVER_WIDTH = 288;
 
@@ -1004,7 +1206,7 @@ function FlagsPopover({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    const onMouseDown = (e: MouseEvent) => {
+    const onMouseDown = (e: globalThis.MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
         onClose();
       }
