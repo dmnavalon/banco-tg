@@ -22,6 +22,17 @@ from .adapters.base import (
 )
 from .keychain import CredentialNotFound
 from .sheets_writer import ensure_maestro_row, mark_snapshot_error, upsert_snapshot
+from . import firestore_writer
+
+
+def _mirror_to_firestore(fn: Callable, *args) -> None:
+    """Espeja una escritura al store Firestore (fuente única del dashboard). El
+    Sheet ya quedó escrito; si Firestore falla, logueamos pero no abortamos la
+    corrida (el dato no se pierde, está en el Sheet de respaldo)."""
+    try:
+        fn(*args)
+    except Exception as e:
+        log.warning("Firestore mirror falló (%s): %s", getattr(fn, "__name__", fn), e)
 
 log = get_logger("patrimonio.runner")
 
@@ -86,7 +97,9 @@ def run_one(site: str, progress: Callable[[str], None] | None = None) -> Holding
     holding = adapter.fetch_holdings()
     ensure_maestro_row(adapter.maestro_row())
     upsert_snapshot(holding)
-    _p(f"✅ [{site}] {format_clp(holding.valor_clp)} guardado en Sheets")
+    _mirror_to_firestore(firestore_writer.upsert_maestro, adapter.maestro_row())
+    _mirror_to_firestore(firestore_writer.upsert_snapshot, holding)
+    _p(f"✅ [{site}] {format_clp(holding.valor_clp)} guardado en Sheets + Firestore")
     return holding
 
 
@@ -118,6 +131,7 @@ def run_all(progress: Callable[[str], None] | None = None) -> dict:
         except SessionExpired as e:
             _p(f"⚠️  [{site}] Sesión expirada: {e}")
             mark_snapshot_error(_inversion_id_for(site), "sesion_expirada")
+            _mirror_to_firestore(firestore_writer.mark_snapshot_error, _inversion_id_for(site), "sesion_expirada")
             telegram_notify.send_message(
                 f"⚠️ Patrimonio: sesión expirada en {site}. "
                 f"Corre `python -m src.patrimonio.cli login {site}` cuando puedas."
@@ -127,6 +141,7 @@ def run_all(progress: Callable[[str], None] | None = None) -> dict:
         except CredentialsRejected as e:
             _p(f"❌ [{site}] Credenciales rechazadas: {e}")
             mark_snapshot_error(_inversion_id_for(site), "credenciales_rechazadas")
+            _mirror_to_firestore(firestore_writer.mark_snapshot_error, _inversion_id_for(site), "credenciales_rechazadas")
             telegram_notify.send_message(
                 f"❌ Patrimonio: {site} rechazó la credencial. "
                 f"Corre `python -m src.patrimonio.cli add {site}` con la clave nueva."
@@ -139,6 +154,7 @@ def run_all(progress: Callable[[str], None] | None = None) -> dict:
                 mark_snapshot_error(_inversion_id_for(site), f"{type(e).__name__}")
             except Exception:
                 pass
+            _mirror_to_firestore(firestore_writer.mark_snapshot_error, _inversion_id_for(site), f"{type(e).__name__}")
             errors += 1
             details.append({"site": site, "status": "error", "error": str(e)})
 
@@ -188,6 +204,8 @@ def write_manual_snapshot(site: str, amount: float, nota: str) -> None:
     )
     ensure_maestro_row(adapter.maestro_row())
     upsert_snapshot(holding)
+    _mirror_to_firestore(firestore_writer.upsert_maestro, adapter.maestro_row())
+    _mirror_to_firestore(firestore_writer.upsert_snapshot, holding)
 
 
 def _inversion_id_for(site: str) -> str:

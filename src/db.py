@@ -463,6 +463,18 @@ def query_movements(
     return rows
 
 
+def export_movements(exclude_ignored: bool = True) -> list[dict]:
+    """Devuelve TODOS los movimientos (sin cap), para que el dashboard calcule
+    los KPIs sobre el histórico completo. `.stream()` pagina internamente, así
+    que esto es una sola lectura full-collection. El filtro de ignorados se hace
+    en Python para no depender de que todo doc legacy tenga `review_status`."""
+    rows = [d.to_dict() for d in _db().collection("movements").stream()]
+    if exclude_ignored:
+        rows = [r for r in rows if r.get("review_status") != "ignored"]
+    rows.sort(key=lambda x: (x.get("date", ""), x.get("inserted_at", "")), reverse=True)
+    return rows
+
+
 # ── telegram_log ───────────────────────────────────────────────────────────
 
 def record_telegram_log(
@@ -866,6 +878,98 @@ def list_taxonomy_overrides() -> dict[str, list[str]]:
             if clean:
                 out[doc.id] = clean
     return out
+
+
+# ── taxonomy_meta (tipo_movimiento / esencial / fijo por categoría) ───────
+# Seedeada desde la pestaña GSheet "TaxonomíaExtendida" (scripts/seed_taxonomy_meta.py).
+# El classifier la lee (cacheada) para derivar `tipo_movimiento` por movimiento.
+
+def get_taxonomy_meta_docs() -> dict[str, dict]:
+    """{cat: {tipo_movimiento, esencial, fijo, recurrente_default}}. Doc id = cat."""
+    out: dict[str, dict] = {}
+    for doc in _db().collection("taxonomy_meta").stream():
+        data = doc.to_dict() or {}
+        out[doc.id] = {
+            "tipo_movimiento": data.get("tipo_movimiento"),
+            "esencial": bool(data.get("esencial", False)),
+            "fijo": bool(data.get("fijo", False)),
+            "recurrente_default": bool(data.get("recurrente_default", False)),
+        }
+    return out
+
+
+def set_taxonomy_meta_doc(cat: str, meta: dict) -> None:
+    """Upsert idempotente de la metadata de una categoría."""
+    _db().collection("taxonomy_meta").document(cat).set({
+        "cat": cat,
+        "tipo_movimiento": meta.get("tipo_movimiento"),
+        "esencial": bool(meta.get("esencial", False)),
+        "fijo": bool(meta.get("fijo", False)),
+        "recurrente_default": bool(meta.get("recurrente_default", False)),
+        "updated_at": _now(),
+    }, merge=True)
+
+
+# ── patrimonio / deudas / inversiones (fuente única Firestore) ────────────
+# KPIs de patrimonio del dashboard. patrimonio_snapshots y deudas_* las llena
+# Diego a mano desde el dashboard; inversiones_* las escriben los scrapers
+# (src/patrimonio/firestore_writer.py). Campos en snake_case; el dashboard los
+# mapea a sus tipos camelCase igual que hace con los movimientos.
+
+def _get_all(collection: str) -> list[dict]:
+    return [d.to_dict() for d in _db().collection(collection).stream()]
+
+
+def _upsert_doc(collection: str, doc_id: str, data: dict) -> None:
+    payload = dict(data)
+    payload["updated_at"] = _now()
+    _db().collection(collection).document(doc_id).set(payload, merge=True)
+
+
+def get_patrimonio_snapshots() -> list[dict]:
+    return _get_all("patrimonio_snapshots")
+
+
+def set_patrimonio_snapshot(mes: str, data: dict) -> None:
+    _upsert_doc("patrimonio_snapshots", mes, {**data, "mes": mes})
+
+
+def get_deudas_maestro() -> list[dict]:
+    return _get_all("deudas_maestro")
+
+
+def set_deuda_maestro(deuda_id: str, data: dict) -> None:
+    _upsert_doc("deudas_maestro", deuda_id, {**data, "id": deuda_id})
+
+
+def get_deudas_snapshots() -> list[dict]:
+    return _get_all("deudas_snapshots")
+
+
+def set_deuda_snapshot(mes: str, deuda_id: str, data: dict) -> None:
+    _upsert_doc("deudas_snapshots", f"{mes}_{deuda_id}", {**data, "mes": mes, "id": deuda_id})
+
+
+def get_inversiones_maestro() -> list[dict]:
+    return _get_all("inversiones_maestro")
+
+
+def set_inversion_maestro(inv_id: str, data: dict) -> None:
+    _upsert_doc("inversiones_maestro", inv_id, {**data, "id": inv_id})
+
+
+def get_inversiones_snapshots() -> list[dict]:
+    return _get_all("inversiones_snapshots")
+
+
+def set_inversion_snapshot(mes: str, inv_id: str, data: dict) -> None:
+    _upsert_doc("inversiones_snapshots", f"{mes}_{inv_id}", {**data, "mes": mes, "id": inv_id})
+
+
+def set_inversion_snapshot_notas(mes: str, inv_id: str, notas: str) -> None:
+    """Merge solo el campo notas (preserva valor_clp del último scrape exitoso).
+    Para marcar errores sin perder el último valor conocido."""
+    _upsert_doc("inversiones_snapshots", f"{mes}_{inv_id}", {"mes": mes, "id": inv_id, "notas": notas})
 
 
 # ── patrimonio_state (cross-host coordination Railway ↔ Mac local) ─────

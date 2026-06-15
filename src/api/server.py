@@ -53,10 +53,12 @@ def create_app() -> Flask | None:
 
     from .routes.categories import bp as categories_bp
     from .routes.movements import bp as movements_bp
-    from .routes.patrimonio import bp as patrimonio_bp
+    from .routes.patrimonio import bp as patrimonio_bp, deudas_bp, inversiones_bp
     app.register_blueprint(movements_bp)
     app.register_blueprint(categories_bp)
     app.register_blueprint(patrimonio_bp)
+    app.register_blueprint(deudas_bp)
+    app.register_blueprint(inversiones_bp)
 
     return app
 
