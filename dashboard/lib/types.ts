@@ -227,9 +227,6 @@ export interface Kpi {
   pasosCalculo?: PasoCalculo[];
   /** Si el KPI viene de otra pestaña (Patrimonio, Deudas, etc.). */
   fuenteDatos?: string;
-  /** Neto de rendiciones del mes (>0 suma a ingresos, <0 a gastos). Lo usan las
-   * tarjetas de ingresos/gastos para saber qué tipos incluir al abrir Movimientos. */
-  rendicionesNetoMes?: number;
 }
 
 export interface SerieMensual {
@@ -265,6 +262,16 @@ export interface Alerta {
   accion: string;
   /** Id de la sección a la que llevar al usuario al clickear la alerta. */
   seccionDestino?: string;
+}
+
+export interface RendicionEntidad {
+  entidad: string;          // subcategoría: Bodemall, Faind, Papá, etc.
+  gastado: number;          // Σ cargos (plata que pusiste tú por esta entidad)
+  reembolsado: number;      // Σ abonos (plata que te devolvió)
+  saldo: number;            // gastado − reembolsado. >0 = te deben; <0 = te adelantaron
+  cantidad: number;
+  movimientosIdxs: number[];
+  ultimaFecha: string;      // fecha del último movimiento (DD/MM/YYYY)
 }
 
 export interface DashboardKPIs {
@@ -310,6 +317,14 @@ export interface DashboardKPIs {
     issues: { tipo: string; count: number; movimientos: Movimiento[] }[];
   };
   alertas: Alerta[];
+  /** Libro de rendiciones (Gastos por rendir) por entidad. Plata de terceros:
+   * NO entra a ingresos ni gastos. El saldo dice quién te debe. */
+  rendiciones: {
+    entidades: RendicionEntidad[];
+    totalGastado: number;
+    totalReembolsado: number;
+    totalPendiente: number;  // Σ saldos positivos (lo que te deben en total)
+  };
   mesActual: string;
   mesesConData: string[];
 }

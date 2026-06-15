@@ -19,18 +19,12 @@ export function ResumenGeneralSection({ kpis, onKpiClick }: { kpis: DashboardKPI
   const handle = (kpi: Kpi) => () => onKpiClick?.(kpi);
 
   // Abre Movimientos en otra pestaña prefiltrada al mes actual con EXACTAMENTE
-  // los tipoMovimiento que componen la tarjeta. Cuando el neto de rendiciones
-  // del mes cayó en este bucket (>0 → ingresos, <0 → gastos), se incluyen también
-  // GastoPorRendir y Devolución, que son los movimientos que lo formaron.
-  const openMovimientos = (kpi: Kpi, base: "Ingreso" | "GastoReal") => () => {
+  // los tipoMovimiento que componen la tarjeta. Las rendiciones (Gastos por
+  // rendir) NO entran a ingresos ni gastos, así que no se incluyen acá.
+  const openMovimientos = (tipos: string[]) => () => {
     const mes = kpis.mesActual; // "YYYY-MM"
     const [y, m] = mes.split("-").map(Number);
     const lastDay = String(new Date(y, m, 0).getDate()).padStart(2, "0");
-    const rend = kpi.rendicionesNetoMes ?? 0;
-    const tipos: string[] = [base];
-    if ((base === "Ingreso" && rend > 0) || (base === "GastoReal" && rend < 0)) {
-      tipos.push("GastoPorRendir", "Devolución");
-    }
     const sp = new URLSearchParams({
       tab: "todos",
       // Mismos estados que cuenta el KPI (todos menos ignorados) → cuadre exacto.
@@ -53,8 +47,8 @@ export function ResumenGeneralSection({ kpis, onKpiClick }: { kpis: DashboardKPI
 
       {/* KPIs grandes */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-        <KpiCard kpi={r.ingresosNetos} size="lg" trendBase="avg6m" onClick={openMovimientos(r.ingresosNetos, "Ingreso")} />
-        <KpiCard kpi={r.gastosTotales} size="lg" trendBase="avg6m" onClick={openMovimientos(r.gastosTotales, "GastoReal")} />
+        <KpiCard kpi={r.ingresosNetos} size="lg" trendBase="avg6m" onClick={openMovimientos(["Ingreso"])} />
+        <KpiCard kpi={r.gastosTotales} size="lg" trendBase="avg6m" onClick={openMovimientos(["GastoReal", "Devolución"])} />
         <KpiCard kpi={r.flujoLibre} size="lg" trendBase="avg6m" onClick={handle(r.flujoLibre)} />
         <KpiCard kpi={r.tasaAhorro} size="lg" onClick={handle(r.tasaAhorro)} />
       </div>

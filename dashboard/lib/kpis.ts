@@ -8,6 +8,7 @@ import {
   Estado,
   Kpi,
   Movimiento,
+  RendicionEntidad,
 } from "./types";
 import { avg, deltaPct, monthKey, previousMonths } from "./utils";
 
@@ -21,8 +22,10 @@ const isOperativo = (m: Movimiento): boolean =>
 const isIngresoOperativo = (m: Movimiento): boolean =>
   isOperativo(m) && m.tipoMovimiento === "Ingreso";
 
-const isGastoReal = (m: Movimiento): boolean =>
-  isOperativo(m) && m.tipoMovimiento === "GastoReal";
+/** Cuenta como gasto real del mes: GastoReal y las devoluciones de compras
+ * PROPIAS (Devolución), que NO son rendiciones y restan del gasto. */
+const isEgreso = (m: Movimiento): boolean =>
+  isOperativo(m) && (m.tipoMovimiento === "GastoReal" || m.tipoMovimiento === "Devolución");
 
 const isPagoDeuda = (m: Movimiento): boolean =>
   isOperativo(m) && m.tipoMovimiento === "PagoDeuda";
@@ -30,21 +33,22 @@ const isPagoDeuda = (m: Movimiento): boolean =>
 const isAhorroOInversion = (m: Movimiento): boolean =>
   isOperativo(m) && (m.tipoMovimiento === "Ahorro" || m.tipoMovimiento === "AporteInversión");
 
-/** Rendiciones y devoluciones: gastos hechos por cuenta de terceros (GastoPorRendir)
- * y sus reembolsos (Devolución). No son ingreso ni gasto por sí solos — se netean
- * por mes y solo la diferencia entra a ingresos (si es positiva) o gastos (si es
- * negativa). */
+/** Rendiciones (Gastos por rendir): plata que pones por cuenta de un tercero
+ * (Bodemall, Faind, Papá, etc.). NO son ingreso ni gasto tuyo — se llevan en un
+ * libro aparte por entidad (calcRendiciones) y quedan FUERA de todos los KPIs.
+ * Tanto lo que gastas (cargo) como lo que te reembolsan (abono) viven acá. */
 const isRendicion = (m: Movimiento): boolean =>
-  isOperativo(m) && (m.tipoMovimiento === "GastoPorRendir" || m.tipoMovimiento === "Devolución");
+  isOperativo(m) && m.tipoMovimiento === "GastoPorRendir";
 
-/** Dirección del flujo dentro del bucket de rendiciones. Las devoluciones de
- * compras con tarjeta vienen marcadas "Cargo" en la cartola aunque son plata
- * que entra, por eso también se mira la descripción. */
-const esEntradaRendicion = (m: Movimiento): boolean =>
-  m.tipo === "Abono" || /DEVOLUCI[OÓ]N|REVERSA/i.test(m.descripcion);
+/** Egreso del MES con signo: un cargo suma; un abono (devolución de una compra
+ * tuya) resta. Ej: compra $100 + devolución $90 = gasto $10. Para compras en
+ * cuotas usa la cuota del mes, no el total. */
+function egresoNeto(m: Movimiento): number {
+  const abs = Math.abs(m.montoMesCLP);
+  return m.tipo === "Abono" ? -abs : abs;
+}
 
-/** Egreso del MES en curso. Para compras en cuotas, esta es la cuota mensual,
- * no el total de la compra. Esto da el flujo de caja real del mes. */
+/** Monto absoluto del mes, sin signo (deuda/ahorro: siempre son salidas). */
 function montoEgreso(m: Movimiento): number {
   return Math.abs(m.montoMesCLP);
 }
@@ -60,18 +64,10 @@ function montoIngreso(m: Movimiento): number {
 
 interface AgregadoMes {
   mes: string;
-  /** Total final: operativos + neto de rendiciones si fue positivo. */
+  /** Σ ingresos del mes (tipoMovimiento=Ingreso). Las rendiciones NO entran. */
   ingresos: number;
-  /** Total final: operativos + |neto de rendiciones| si fue negativo. */
+  /** Σ gastos reales del mes (GastoReal − devoluciones de compras propias). */
   gastosReales: number;
-  /** Solo movimientos tipoMovimiento=Ingreso (antes de sumar neto de rendiciones). */
-  ingresosOperativos: number;
-  /** Solo movimientos tipoMovimiento=GastoReal (antes de sumar neto de rendiciones). */
-  gastosRealesOperativos: number;
-  rendicionesAbonos: number;
-  rendicionesCargos: number;
-  /** Abonos − cargos de rendiciones/devoluciones del mes. */
-  rendicionesNeto: number;
   pagosDeuda: number;
   ahorroEInversion: number;
   flujoLibre: number;
@@ -82,8 +78,6 @@ interface AgregadoMes {
   // Idxs de movimientos que entraron a cada bucket
   ingresosIdxs: number[];
   gastosRealesIdxs: number[];
-  rendicionesAbonosIdxs: number[];
-  rendicionesCargosIdxs: number[];
   pagosDeudaIdxs: number[];
   ahorroEInversionIdxs: number[];
   gastoEsencialIdxs: number[];
@@ -95,11 +89,10 @@ interface AgregadoMes {
 function emptyAggregate(mes: string): AgregadoMes {
   return {
     mes,
-    ingresos: 0, gastosReales: 0, ingresosOperativos: 0, gastosRealesOperativos: 0,
-    rendicionesAbonos: 0, rendicionesCargos: 0, rendicionesNeto: 0,
+    ingresos: 0, gastosReales: 0,
     pagosDeuda: 0, ahorroEInversion: 0,
     flujoLibre: 0, gastoEsencial: 0, gastoDiscrecional: 0, gastoFijo: 0, gastoVariable: 0,
-    ingresosIdxs: [], gastosRealesIdxs: [], rendicionesAbonosIdxs: [], rendicionesCargosIdxs: [],
+    ingresosIdxs: [], gastosRealesIdxs: [],
     pagosDeudaIdxs: [], ahorroEInversionIdxs: [],
     gastoEsencialIdxs: [], gastoDiscrecionalIdxs: [], gastoFijoIdxs: [], gastoVariableIdxs: [],
   };
@@ -110,14 +103,15 @@ function agregarPorMes(movimientos: Movimiento[]): Map<string, AgregadoMes> {
 
   for (const m of movimientos) {
     if (m.excluido) continue;
+    if (isRendicion(m)) continue; // rendiciones → libro aparte (calcRendiciones), fuera de KPIs
     const k = monthKey(m.fecha);
     if (!map.has(k)) map.set(k, emptyAggregate(k));
     const agg = map.get(k)!;
     if (isIngresoOperativo(m)) {
       agg.ingresos += montoIngreso(m);
       agg.ingresosIdxs.push(m.idx);
-    } else if (isGastoReal(m)) {
-      const e = montoEgreso(m);
+    } else if (isEgreso(m)) {
+      const e = egresoNeto(m); // cargo suma, devolución (abono) resta
       agg.gastosReales += e;
       agg.gastosRealesIdxs.push(m.idx);
       if (m.esencial) { agg.gastoEsencial += e; agg.gastoEsencialIdxs.push(m.idx); }
@@ -130,28 +124,10 @@ function agregarPorMes(movimientos: Movimiento[]): Map<string, AgregadoMes> {
     } else if (isAhorroOInversion(m)) {
       agg.ahorroEInversion += montoEgreso(m);
       agg.ahorroEInversionIdxs.push(m.idx);
-    } else if (isRendicion(m)) {
-      if (esEntradaRendicion(m)) {
-        agg.rendicionesAbonos += montoIngreso(m);
-        agg.rendicionesAbonosIdxs.push(m.idx);
-      } else {
-        agg.rendicionesCargos += montoEgreso(m);
-        agg.rendicionesCargosIdxs.push(m.idx);
-      }
     }
   }
 
   for (const agg of map.values()) {
-    agg.ingresosOperativos = agg.ingresos;
-    agg.gastosRealesOperativos = agg.gastosReales;
-    // Neteo de rendiciones: solo la diferencia del mes entra al flujo.
-    // Si reembolsaron más de lo gastado → ingreso; si falta por cobrar → gasto.
-    agg.rendicionesNeto = agg.rendicionesAbonos - agg.rendicionesCargos;
-    if (agg.rendicionesNeto > 0) {
-      agg.ingresos += agg.rendicionesNeto;
-    } else if (agg.rendicionesNeto < 0) {
-      agg.gastosReales += -agg.rendicionesNeto;
-    }
     agg.flujoLibre = agg.ingresos - agg.gastosReales - agg.pagosDeuda;
   }
 
@@ -176,7 +152,6 @@ function buildKpi(opts: {
   breakdownIdxs?: number[];
   pasosCalculo?: Kpi["pasosCalculo"];
   fuenteDatos?: string;
-  rendicionesNetoMes?: number;
 }): Kpi {
   return {
     nombre: opts.nombre,
@@ -192,7 +167,6 @@ function buildKpi(opts: {
     breakdownIdxs: opts.breakdownIdxs,
     pasosCalculo: opts.pasosCalculo,
     fuenteDatos: opts.fuenteDatos,
-    rendicionesNetoMes: opts.rendicionesNetoMes,
   };
 }
 
@@ -251,11 +225,8 @@ function calcResumen(
   const aggMes = agregados.get(mesActual);
   const ingresosNetos = aggMes?.ingresos ?? null;
   const gastosTotales = aggMes?.gastosReales ?? null;
-  const rendNeto = aggMes?.rendicionesNeto ?? 0;
-  const rendIdxs = aggMes ? [...aggMes.rendicionesAbonosIdxs, ...aggMes.rendicionesCargosIdxs] : [];
-  // Si el neto de rendiciones cayó en un bucket, sus movimientos forman parte del detalle.
-  const ingresosIdxs = aggMes ? (rendNeto > 0 ? [...aggMes.ingresosIdxs, ...rendIdxs] : aggMes.ingresosIdxs) : undefined;
-  const gastosIdxs = aggMes ? (rendNeto < 0 ? [...aggMes.gastosRealesIdxs, ...rendIdxs] : aggMes.gastosRealesIdxs) : undefined;
+  const ingresosIdxs = aggMes?.ingresosIdxs;
+  const gastosIdxs = aggMes?.gastosRealesIdxs;
   const pagosDeuda = aggMes?.pagosDeuda ?? 0;
   const flujoLibre = ingresosNetos !== null && gastosTotales !== null ? ingresosNetos - gastosTotales - pagosDeuda : null;
   const ahorroEInversion = aggMes?.ahorroEInversion ?? 0;
@@ -321,33 +292,17 @@ function calcResumen(
       nombre: "Ingresos netos del mes",
       valor: ingresosNetos,
       formato: "CLP",
-      formula: `Σ movimientos del mes ${mesActual} con tipoMovimiento=Ingreso (sueldo, arriendos, honorarios, etc.), excluyendo movimientos internos, ventas de activos (traspaso inversión→caja, no es ingreso nuevo) y excluidos. Las rendiciones se netean contra sus reembolsos y solo la diferencia positiva del mes suma acá. ${aggMes?.ingresosIdxs.length ?? 0} movimientos de ingreso sumados${rendNeto > 0 ? ` + neto de rendiciones de ${rendIdxs.length} movimientos` : ""}.`,
+      formula: `Σ movimientos del mes ${mesActual} con tipoMovimiento=Ingreso (sueldo, arriendos, honorarios, etc.), excluyendo movimientos internos, ventas de activos (traspaso inversión→caja) y excluidos. Las rendiciones (gastos por rendir y sus reembolsos) NO entran acá — son plata de terceros y van a su propio libro. ${aggMes?.ingresosIdxs.length ?? 0} movimientos.`,
       breakdownIdxs: ingresosIdxs,
-      rendicionesNetoMes: rendNeto,
       comparaciones: ingresosNetos !== null ? comparacionesContra(ingresosNetos, agregados, mesActual, "ingresos") : undefined,
-      pasosCalculo: aggMes && rendNeto > 0
-        ? [
-            { etiqueta: "Ingresos operativos (sueldo, arriendos, etc.)", valor: aggMes.ingresosOperativos, formato: "CLP", breakdownIdxs: aggMes.ingresosIdxs },
-            { etiqueta: "+ Neto rendiciones (reembolsos − gastos rendidos)", valor: rendNeto, formato: "CLP", breakdownIdxs: rendIdxs },
-            { etiqueta: "= Ingresos netos", valor: ingresosNetos, formato: "CLP" },
-          ]
-        : undefined,
     }),
     gastosTotales: buildKpi({
       nombre: "Gastos totales del mes",
       valor: gastosTotales,
       formato: "CLP",
-      formula: `Σ del MontoMesCLP de los ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos del mes ${mesActual} con tipoMovimiento=GastoReal (excluye movs internos, pagos de TC, aportes a inversión y excluidos). Las compras en cuotas se expanden en una cuota por mes (fechada mes a mes desde la compra, hasta el mes actual), así cada mes suma su cuota (Cuota a pagar) y no el total de la compra — eso refleja el flujo de caja real del mes. Las rendiciones se netean contra sus reembolsos; si quedó saldo por cobrar en el mes, esa diferencia suma acá.`,
+      formula: `Σ del monto del mes de los ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos del mes ${mesActual} con tipoMovimiento=GastoReal (excluye internos, pagos de TC, aportes a inversión, rendiciones y excluidos). Las devoluciones de compras propias RESTAN (compra $100 + devolución $90 = gasto $10). Las compras en cuotas suman la cuota del mes, no el total.`,
       breakdownIdxs: gastosIdxs,
-      rendicionesNetoMes: rendNeto,
       comparaciones: gastosTotales !== null ? comparacionesContra(gastosTotales, agregados, mesActual, "gastosReales") : undefined,
-      pasosCalculo: aggMes && rendNeto < 0
-        ? [
-            { etiqueta: "Gastos reales del mes", valor: aggMes.gastosRealesOperativos, formato: "CLP", breakdownIdxs: aggMes.gastosRealesIdxs },
-            { etiqueta: "+ Rendiciones aún no reembolsadas (neto)", valor: -rendNeto, formato: "CLP", breakdownIdxs: rendIdxs },
-            { etiqueta: "= Gastos totales", valor: gastosTotales, formato: "CLP" },
-          ]
-        : undefined,
     }),
     flujoLibre: buildKpi({
       nombre: "Flujo libre mensual",
@@ -531,7 +486,7 @@ function calcGastos(
   mesActual: string,
   agregados: Map<string, AgregadoMes>,
 ): DashboardKPIs["gastos"] {
-  const movsMes = data.movimientos.filter((m) => isGastoReal(m) && monthKey(m.fecha) === mesActual);
+  const movsMes = data.movimientos.filter((m) => isEgreso(m) && monthKey(m.fecha) === mesActual);
 
   const groupBy = <K extends string>(arr: Movimiento[], keyFn: (m: Movimiento) => K): Map<K, CategoriaGasto> => {
     const map = new Map<K, CategoriaGasto>();
@@ -539,13 +494,13 @@ function calcGastos(
       const k = keyFn(m);
       const existing = map.get(k);
       if (existing) {
-        existing.montoCLP += montoEgreso(m);
+        existing.montoCLP += egresoNeto(m);
         existing.cantidad += 1;
       } else {
         map.set(k, {
           categoria: m.categoria,
           subcategoria: m.subcategoria,
-          montoCLP: montoEgreso(m),
+          montoCLP: egresoNeto(m),
           cantidad: 1,
           esencial: m.esencial,
           fijo: m.fijo,
@@ -565,9 +520,9 @@ function calcGastos(
   const desviaciones: DesviacionCategoria[] = porCategoria.map((c) => {
     const totalesPorMes = ultimosSeis.map((m) => {
       const movs = data.movimientos.filter(
-        (mov) => isGastoReal(mov) && monthKey(mov.fecha) === m && mov.categoria === c.categoria,
+        (mov) => isEgreso(mov) && monthKey(mov.fecha) === m && mov.categoria === c.categoria,
       );
-      return movs.reduce((s, mov) => s + montoEgreso(mov), 0);
+      return movs.reduce((s, mov) => s + egresoNeto(mov), 0);
     });
     const histAvg = avg(totalesPorMes.filter((v) => v > 0));
     const dif = histAvg !== null ? c.montoCLP - histAvg : 0;
@@ -773,6 +728,45 @@ function calcAlertas(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Rendiciones (libro aparte por entidad — plata de terceros, fuera de KPIs)
+// ─────────────────────────────────────────────────────────────────────────────
+
+function calcRendiciones(data: DashboardData): DashboardKPIs["rendiciones"] {
+  const map = new Map<string, RendicionEntidad>();
+  const maxTime = new Map<string, number>();
+  for (const m of data.movimientos) {
+    if (m.excluido || m.tipoMovimiento !== "GastoPorRendir") continue;
+    const entidad = m.subcategoria || "(sin entidad)";
+    let r = map.get(entidad);
+    if (!r) {
+      r = { entidad, gastado: 0, reembolsado: 0, saldo: 0, cantidad: 0, movimientosIdxs: [], ultimaFecha: "" };
+      map.set(entidad, r);
+      maxTime.set(entidad, 0);
+    }
+    const monto = Math.abs(m.montoCLP);
+    // Abono = te reembolsaron; Cargo = pusiste plata por la entidad.
+    if (m.tipo === "Abono") r.reembolsado += monto;
+    else r.gastado += monto;
+    r.cantidad += 1;
+    r.movimientosIdxs.push(m.idx);
+    const t = m.fecha.getTime();
+    if (t >= (maxTime.get(entidad) ?? 0)) {
+      maxTime.set(entidad, t);
+      r.ultimaFecha = m.fechaISO;
+    }
+  }
+  const entidades = Array.from(map.values()).map((r) => ({ ...r, saldo: r.gastado - r.reembolsado }));
+  // Orden: primero las que tienen saldo pendiente más grande (te deben más).
+  entidades.sort((a, b) => b.saldo - a.saldo);
+  return {
+    entidades,
+    totalGastado: entidades.reduce((s, e) => s + e.gastado, 0),
+    totalReembolsado: entidades.reduce((s, e) => s + e.reembolsado, 0),
+    totalPendiente: entidades.filter((e) => e.saldo > 0).reduce((s, e) => s + e.saldo, 0),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Entrypoint
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -786,6 +780,7 @@ export function calculateDashboard(data: DashboardData, mesOverride?: string): D
   const gastos = calcGastos(data, mesActual, agregados);
   const calidadDatos = calcCalidadDatos(data);
   const alertas = calcAlertas(data, resumen, gastos, calidadDatos);
+  const rendiciones = calcRendiciones(data);
 
   return {
     resumen,
@@ -793,6 +788,7 @@ export function calculateDashboard(data: DashboardData, mesOverride?: string): D
     gastos,
     calidadDatos,
     alertas,
+    rendiciones,
     mesActual,
     mesesConData,
   };

@@ -7,11 +7,12 @@ import { GastosSection } from "./sections/Gastos";
 import { CalidadDatosSection } from "./sections/CalidadDatos";
 import { AlertasSection } from "./sections/Alertas";
 import { PatrimonioSection } from "./sections/Patrimonio";
+import { RendicionesSection } from "./sections/Rendiciones";
 import { PlaceholderSection } from "./sections/Placeholder";
 import { DetalleKpiPanel } from "./ui/DetalleKpiPanel";
 import { ThemeToggle } from "./ui/ThemeToggle";
 import { cn } from "@/lib/utils";
-import { LayoutDashboard, TrendingUp, DollarSign, Target, CreditCard, Wallet, PieChart, Building, ShieldCheck, Bell, Sparkles, ListChecks } from "lucide-react";
+import { LayoutDashboard, TrendingUp, DollarSign, Target, CreditCard, Wallet, PieChart, Building, ShieldCheck, Bell, Sparkles, ListChecks, HandCoins } from "lucide-react";
 import Link from "next/link";
 
 const MOVIMIENTOS_ENABLED = process.env.NEXT_PUBLIC_ENABLE_MOVIMIENTOS_REVIEW === "true";
@@ -20,6 +21,7 @@ const SECTIONS = [
   { id: "resumen", label: "Resumen", Icon: LayoutDashboard },
   { id: "flujo", label: "Flujo de caja", Icon: TrendingUp },
   { id: "gastos", label: "Gastos", Icon: DollarSign },
+  { id: "rendiciones", label: "Rendiciones", Icon: HandCoins },
   { id: "presupuesto", label: "Presupuesto", Icon: Target },
   { id: "deuda", label: "Deuda", Icon: CreditCard },
   { id: "fondo", label: "Fondo emergencia", Icon: Wallet },
@@ -108,6 +110,7 @@ export function Dashboard({ kpis, data }: { kpis: DashboardKPIs; data: Dashboard
 
         {active === "resumen" && <ResumenGeneralSection kpis={kpis} onKpiClick={(kpi) => openKpi(kpi, "Resumen general")} />}
         {active === "gastos" && <GastosSection kpis={kpis} />}
+        {active === "rendiciones" && <RendicionesSection kpis={kpis} />}
         {active === "calidad" && <CalidadDatosSection kpis={kpis} />}
         {active === "alertas" && <AlertasSection kpis={kpis} onNavigate={(s) => setActive(s as SectionId)} />}
         {active === "flujo" && (
