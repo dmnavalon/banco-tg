@@ -18,6 +18,7 @@ import { formatCLP } from "@/lib/utils";
 import { Card, CardHeader } from "../ui/Card";
 import { SectionHeader } from "../ui/SectionHeader";
 import { EmptyState } from "../ui/EmptyState";
+import { FinanzasManual } from "./FinanzasManual";
 
 interface PatrimonioSnapshot {
   id: string;
@@ -149,10 +150,6 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
     }
   }, [router]);
 
-  const warningsHojas = data.warnings.filter((w) =>
-    /Inversiones_Maestro|Inversiones_Snapshot|Patrimonio/i.test(w),
-  );
-
   const refreshButton = (
     <button
       onClick={handleSync}
@@ -173,15 +170,7 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
             {syncMsg}
           </div>
         )}
-        {warningsHojas.length > 0 && (
-          <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-800 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-300">
-            <p className="font-medium">No pude leer las hojas de inversiones:</p>
-            <ul className="ml-4 mt-1 list-disc">
-              {warningsHojas.map((w, i) => <li key={i}>{w}</li>)}
-            </ul>
-            <p className="mt-2">Verifica en Vercel que <code>GSHEET_SPREADSHEET_ID</code> apunte al spreadsheet correcto y que el service account tenga acceso a esas hojas.</p>
-          </div>
-        )}
+        <FinanzasManual data={data} />
         <EmptyState
           icon={<Building className="h-10 w-10" />}
           title="Sin sitios configurados"
@@ -204,6 +193,8 @@ export function PatrimonioSection({ data }: { data: DashboardData }) {
           {syncMsg}
         </div>
       )}
+
+      <FinanzasManual data={data} />
 
       {/* Total */}
       <Card padding="lg">

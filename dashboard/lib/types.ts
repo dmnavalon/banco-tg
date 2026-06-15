@@ -227,6 +227,9 @@ export interface Kpi {
   pasosCalculo?: PasoCalculo[];
   /** Si el KPI viene de otra pestaña (Patrimonio, Deudas, etc.). */
   fuenteDatos?: string;
+  /** Neto de rendiciones del mes (>0 suma a ingresos, <0 a gastos). Lo usan las
+   * tarjetas de ingresos/gastos para saber qué tipos incluir al abrir Movimientos. */
+  rendicionesNetoMes?: number;
 }
 
 export interface SerieMensual {

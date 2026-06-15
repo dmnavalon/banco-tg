@@ -28,17 +28,22 @@ function backendToken(): string {
   return t;
 }
 
-async function fetchBackend(path: string, init: RequestInit = {}): Promise<Response> {
+export async function fetchBackend(path: string, init: RequestInit = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("Authorization", `Bearer ${backendToken()}`);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  // Por defecto no-store (mutaciones/listados real-time). El dashboard de KPIs
+  // pasa `next: { revalidate }` para cachear corto y no martillar Firestore;
+  // `cache` y `next` son mutuamente excluyentes en Next, así que se elige uno.
+  const cacheOpts: RequestInit = init.next
+    ? { next: init.next }
+    : { cache: init.cache ?? "no-store" };
   const r = await fetch(`${backendUrl()}${path}`, {
     ...init,
     headers,
-    // No cachear; los datos cambian en tiempo real con TG/dashboard.
-    cache: "no-store",
+    ...cacheOpts,
   });
   return r;
 }

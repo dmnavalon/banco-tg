@@ -176,6 +176,7 @@ function buildKpi(opts: {
   breakdownIdxs?: number[];
   pasosCalculo?: Kpi["pasosCalculo"];
   fuenteDatos?: string;
+  rendicionesNetoMes?: number;
 }): Kpi {
   return {
     nombre: opts.nombre,
@@ -191,6 +192,7 @@ function buildKpi(opts: {
     breakdownIdxs: opts.breakdownIdxs,
     pasosCalculo: opts.pasosCalculo,
     fuenteDatos: opts.fuenteDatos,
+    rendicionesNetoMes: opts.rendicionesNetoMes,
   };
 }
 
@@ -321,6 +323,7 @@ function calcResumen(
       formato: "CLP",
       formula: `Σ movimientos del mes ${mesActual} con tipoMovimiento=Ingreso (sueldo, arriendos, honorarios, etc.), excluyendo movimientos internos, ventas de activos (traspaso inversión→caja, no es ingreso nuevo) y excluidos. Las rendiciones se netean contra sus reembolsos y solo la diferencia positiva del mes suma acá. ${aggMes?.ingresosIdxs.length ?? 0} movimientos de ingreso sumados${rendNeto > 0 ? ` + neto de rendiciones de ${rendIdxs.length} movimientos` : ""}.`,
       breakdownIdxs: ingresosIdxs,
+      rendicionesNetoMes: rendNeto,
       comparaciones: ingresosNetos !== null ? comparacionesContra(ingresosNetos, agregados, mesActual, "ingresos") : undefined,
       pasosCalculo: aggMes && rendNeto > 0
         ? [
@@ -336,6 +339,7 @@ function calcResumen(
       formato: "CLP",
       formula: `Σ del MontoMesCLP de los ${aggMes?.gastosRealesIdxs.length ?? 0} movimientos del mes ${mesActual} con tipoMovimiento=GastoReal (excluye movs internos, pagos de TC, aportes a inversión y excluidos). Las compras en cuotas se expanden en una cuota por mes (fechada mes a mes desde la compra, hasta el mes actual), así cada mes suma su cuota (Cuota a pagar) y no el total de la compra — eso refleja el flujo de caja real del mes. Las rendiciones se netean contra sus reembolsos; si quedó saldo por cobrar en el mes, esa diferencia suma acá.`,
       breakdownIdxs: gastosIdxs,
+      rendicionesNetoMes: rendNeto,
       comparaciones: gastosTotales !== null ? comparacionesContra(gastosTotales, agregados, mesActual, "gastosReales") : undefined,
       pasosCalculo: aggMes && rendNeto < 0
         ? [

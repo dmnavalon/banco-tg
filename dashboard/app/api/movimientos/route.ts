@@ -10,7 +10,7 @@ function parseFilters(url: URL): MovementsFilters {
   const f: MovementsFilters = {};
   const sp = url.searchParams;
   const passthrough = ["status", "from", "to", "bank", "persona", "categoria",
-                       "subcategoria", "q", "comercio"] as const;
+                       "subcategoria", "q", "comercio", "tipo_movimiento", "excluido"] as const;
   for (const k of passthrough) {
     const v = sp.get(k);
     if (v !== null && v !== "") f[k] = v;

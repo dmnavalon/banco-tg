@@ -41,6 +41,12 @@ export interface Movimiento {
   requiere_revision: boolean | null;
   pregunta_sugerida: string | null;
 
+  // Campos calculados por el backend (serializer). Fuente única para la
+  // clasificación contable que usan tanto la vista Movimientos como los KPIs.
+  tipo_movimiento: string;
+  esencial_efectivo: boolean;
+  fijo_efectivo: boolean;
+
   review_status: ReviewStatus;
   sheet_sync_status: SheetSyncStatus;
   version: number;
@@ -148,6 +154,8 @@ export interface MovementsFilters {
   confidence_min?: number;
   q?: string;                  // búsqueda en descripción
   comercio?: string;
+  tipo_movimiento?: string;    // calculado; coma-lista: "Ingreso,GastoPorRendir"
+  excluido?: string;           // "true" | "false"
   limit?: number;
 }
 

@@ -64,8 +64,16 @@ interface Filters {
   comercio: string;
   persona: string;
   categoria: string;
-  tipo: string;
+  tipoMovimiento: string;
+  excluido: string;
 }
+
+// Clasificación contable derivada por el backend (campo tipo_movimiento). Es la
+// misma que usan los KPIs, por eso filtrar por acá cuadra con las tarjetas.
+const TIPO_MOVIMIENTO_OPTS = [
+  "Ingreso", "GastoReal", "GastoPorRendir", "Devolución", "PagoDeuda",
+  "Ahorro", "AporteInversión", "RetiroInversión", "MovimientoInterno", "Impuesto",
+] as const;
 
 const EMPTY_FILTERS: Filters = {
   q: "",
@@ -78,7 +86,8 @@ const EMPTY_FILTERS: Filters = {
   comercio: "",
   persona: "",
   categoria: "",
-  tipo: "",
+  tipoMovimiento: "",
+  excluido: "",
 };
 
 type SortKey = "estado" | "date" | "amount" | "confidence";
@@ -177,6 +186,10 @@ export function MovimientosTable() {
   } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [sort, setSort] = useState<SortState | null>(null);
+  // Status explícito (coma-lista) que llega por URL desde las tarjetas del
+  // dashboard. Sobrescribe el status derivado del tab para que las filas
+  // mostradas cuadren EXACTO con el KPI (que excluye ignorados). null = usar tab.
+  const [statusOverride, setStatusOverride] = useState<string | null>(null);
 
   // Orden client-side sobre el set ya cargado. Click en header: 1º asc, 2º desc.
   const toggleSort = (key: SortKey) => {
@@ -200,6 +213,8 @@ export function MovimientosTable() {
     const sp = new URLSearchParams(window.location.search);
     const t = sp.get("tab");
     if (t && t in TAB_LABELS) setTab(t as TabKey);
+    const status = sp.get("status");
+    if (status) setStatusOverride(status);
     const init: Partial<Filters> = {};
     for (const k of Object.keys(EMPTY_FILTERS) as (keyof Filters)[]) {
       const v = sp.get(k);
@@ -218,14 +233,15 @@ export function MovimientosTable() {
 
   const buildQuery = useCallback(() => {
     const sp = new URLSearchParams();
-    sp.set("status", TAB_TO_FILTER[tab]);
+    sp.set("status", statusOverride ?? TAB_TO_FILTER[tab]);
     sp.set("limit", "200");
     for (const [k, v] of Object.entries(filters)) {
-      // "tipo" se filtra client-side: el backend no soporta ese parámetro.
-      if (v && k !== "tipo") sp.set(k, v);
+      if (!v) continue;
+      // El backend espera snake_case para el campo calculado.
+      sp.set(k === "tipoMovimiento" ? "tipo_movimiento" : k, v);
     }
     return sp.toString();
-  }, [tab, filters]);
+  }, [tab, filters, statusOverride]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -288,8 +304,9 @@ export function MovimientosTable() {
     });
   };
 
-  // Tipo se filtra acá (no en el backend).
-  const visible = filters.tipo ? items.filter((m) => m.tipo === filters.tipo) : items;
+  // tipoMovimiento y excluido se filtran server-side (backend), así que `items`
+  // ya viene filtrado.
+  const visible = items;
 
   const sortedVisible = useMemo(() => {
     if (!sort) return visible;
@@ -556,7 +573,7 @@ export function MovimientosTable() {
         {(Object.keys(TAB_LABELS) as TabKey[]).map((k) => (
           <button
             key={k}
-            onClick={() => setTab(k)}
+            onClick={() => { setTab(k); setStatusOverride(null); }}
             className={`px-4 py-2 text-sm font-medium border-b-2 -mb-px transition ${
               tab === k
                 ? "border-blue-600 text-blue-700"
@@ -647,14 +664,14 @@ export function MovimientosTable() {
             className="rounded border border-slate-300 px-2 py-1 text-sm"
           />
           <select
-            value={filters.tipo}
-            onChange={(e) => setFilters({ ...filters, tipo: e.target.value })}
+            value={filters.tipoMovimiento}
+            onChange={(e) => setFilters({ ...filters, tipoMovimiento: e.target.value })}
             className="rounded border border-slate-300 px-2 py-1 text-sm"
           >
-            <option value="">Tipo (todos)</option>
-            <option value="Ingreso">Ingreso</option>
-            <option value="Egreso">Egreso</option>
-            <option value="Transferencia interna">Transferencia interna</option>
+            <option value="">Tipo mov. (todos)</option>
+            {TIPO_MOVIMIENTO_OPTS.map((t) => (
+              <option key={t} value={t}>{t}</option>
+            ))}
           </select>
           <select
             value={filters.categoria}
@@ -789,7 +806,7 @@ export function MovimientosTable() {
                 .join(" · ");
               const metaFull = [
                 metaShort,
-                m.tipo ? `Tipo: ${m.tipo}` : "",
+                m.tipo_movimiento ? `Tipo: ${m.tipo_movimiento}` : "",
                 m.correction_hint ? `IA: «${m.correction_hint}»` : "",
                 m.comment ? `Comentario: ${m.comment}` : "",
                 m.ignore_reason ? `Ignorado: ${m.ignore_reason}` : "",
