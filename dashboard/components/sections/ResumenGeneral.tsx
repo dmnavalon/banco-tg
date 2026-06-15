@@ -27,7 +27,7 @@ export function ResumenGeneralSection({ kpis, onKpiClick }: { kpis: DashboardKPI
     const [y, m] = mes.split("-").map(Number);
     const lastDay = String(new Date(y, m, 0).getDate()).padStart(2, "0");
     const rend = kpi.rendicionesNetoMes ?? 0;
-    const tipos = [base];
+    const tipos: string[] = [base];
     if ((base === "Ingreso" && rend > 0) || (base === "GastoReal" && rend < 0)) {
       tipos.push("GastoPorRendir", "Devolución");
     }
