@@ -64,6 +64,7 @@ interface Filters {
   comercio: string;
   persona: string;
   categoria: string;
+  subcategoria: string;
   tipoMovimiento: string;
   excluido: string;
 }
@@ -87,6 +88,7 @@ const FILTER_LABELS: Record<keyof Filters, string> = {
   max_amount: "Monto máx",
   confidence_min: "Confianza mín",
   categoria: "Categoría",
+  subcategoria: "Subcategoría",
   tipoMovimiento: "Tipo",
   excluido: "Excluido",
 };
@@ -102,6 +104,7 @@ const EMPTY_FILTERS: Filters = {
   comercio: "",
   persona: "",
   categoria: "",
+  subcategoria: "",
   tipoMovimiento: "",
   excluido: "",
 };
