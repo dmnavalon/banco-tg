@@ -75,6 +75,22 @@ const TIPO_MOVIMIENTO_OPTS = [
   "Ahorro", "AporteInversión", "RetiroInversión", "MovimientoInterno", "Impuesto",
 ] as const;
 
+// Etiquetas legibles para la barra de "filtros activos" (chips).
+const FILTER_LABELS: Record<keyof Filters, string> = {
+  q: "Texto",
+  comercio: "Comercio",
+  bank: "Banco",
+  persona: "Persona",
+  from: "Desde",
+  to: "Hasta",
+  min_amount: "Monto mín",
+  max_amount: "Monto máx",
+  confidence_min: "Confianza mín",
+  categoria: "Categoría",
+  tipoMovimiento: "Tipo",
+  excluido: "Excluido",
+};
+
 const EMPTY_FILTERS: Filters = {
   q: "",
   bank: "",
@@ -186,6 +202,7 @@ export function MovimientosTable() {
   } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [sort, setSort] = useState<SortState | null>(null);
+  const [filtrosOpen, setFiltrosOpen] = useState(false);
   // Status explícito (coma-lista) que llega por URL desde las tarjetas del
   // dashboard. Sobrescribe el status derivado del tab para que las filas
   // mostradas cuadren EXACTO con el KPI (que excluye ignorados). null = usar tab.
@@ -221,6 +238,9 @@ export function MovimientosTable() {
       if (v) init[k] = v;
     }
     if (Object.keys(init).length > 0) setFilters((f) => ({ ...f, ...init }));
+    // Si llegamos prefiltrados (desde una tarjeta), abrir el panel para que el
+    // filtro sea visible y editable.
+    if (Object.keys(init).length > 0 || status) setFiltrosOpen(true);
   }, []);
 
   // Carga taxonomía una vez al montar.
@@ -564,6 +584,18 @@ export function MovimientosTable() {
     setItems((prev) => prev.map((m) => (m.id === mov.id ? mov : m)));
   };
 
+  // Filtros activos (para la barra visible). Incluye el status override que
+  // llega desde las tarjetas del dashboard.
+  const activeChips = (Object.keys(filters) as (keyof Filters)[])
+    .filter((k) => filters[k])
+    .map((k) => ({ k, label: `${FILTER_LABELS[k]}: ${filters[k]}` }));
+  const clearFilter = (k: keyof Filters) => setFilters((f) => ({ ...f, [k]: "" }));
+  const clearAllFilters = () => {
+    setFilters(EMPTY_FILTERS);
+    setStatusOverride(null);
+  };
+  const hayFiltros = activeChips.length > 0 || statusOverride !== null;
+
   // ── Render ────────────────────────────────────────────────────────────
 
   return (
@@ -603,8 +635,42 @@ export function MovimientosTable() {
         </div>
       </div>
 
+      {/* Barra de filtros activos — visible siempre que haya filtros (ej. al
+          llegar desde una tarjeta del dashboard, que prefiltra por la URL). */}
+      {hayFiltros && (
+        <div className="flex flex-wrap items-center gap-2 rounded border border-blue-200 bg-blue-50 px-3 py-2 text-xs">
+          <span className="font-medium text-blue-900">Filtros activos:</span>
+          {statusOverride !== null && (
+            <span className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-blue-800 ring-1 ring-blue-200">
+              Estado: sin ignorados
+              <button onClick={() => setStatusOverride(null)} className="text-blue-500 hover:text-blue-800" aria-label="Quitar filtro de estado">
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          )}
+          {activeChips.map(({ k, label }) => (
+            <span key={k} className="inline-flex items-center gap-1 rounded-full bg-white px-2 py-0.5 text-blue-800 ring-1 ring-blue-200">
+              {label}
+              <button onClick={() => clearFilter(k)} className="text-blue-500 hover:text-blue-800" aria-label={`Quitar filtro ${label}`}>
+                <X className="h-3 w-3" />
+              </button>
+            </span>
+          ))}
+          <button
+            onClick={clearAllFilters}
+            className="ml-auto rounded border border-blue-300 bg-white px-2 py-0.5 font-medium text-blue-700 hover:bg-blue-100"
+          >
+            Limpiar todo
+          </button>
+        </div>
+      )}
+
       {/* Filtros */}
-      <details className="rounded border border-slate-200 bg-white">
+      <details
+        open={filtrosOpen}
+        onToggle={(e) => setFiltrosOpen((e.currentTarget as HTMLDetailsElement).open)}
+        className="rounded border border-slate-200 bg-white"
+      >
         <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-slate-700">Filtros</summary>
         <div className="grid grid-cols-2 gap-2 border-t border-slate-100 p-3 md:grid-cols-4">
           <input
@@ -697,7 +763,7 @@ export function MovimientosTable() {
             className="rounded border border-slate-300 px-2 py-1 text-sm"
           />
           <button
-            onClick={() => setFilters(EMPTY_FILTERS)}
+            onClick={clearAllFilters}
             className="rounded border border-slate-300 bg-white px-3 py-1 text-sm hover:bg-slate-50"
           >
             Limpiar
