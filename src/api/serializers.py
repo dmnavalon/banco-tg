@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..classifier import derive_tipo_movimiento, get_taxonomy_meta
+
 # Conjunto de campos que el dashboard puede leer del documento Firestore. Lo
 # explicitamos para evitar exponer accidentalmente datos sensibles si en el
 # futuro se agregan campos privados (ej. credenciales pegadas mal a mov).
@@ -26,8 +28,16 @@ _FIELDS = (
 )
 
 
-def serialize_movement(mov: dict[str, Any]) -> dict[str, Any]:
-    """Devuelve un dict JSON-serializable con solo los campos públicos."""
+def serialize_movement(mov: dict[str, Any], meta: dict[str, dict] | None = None) -> dict[str, Any]:
+    """Devuelve un dict JSON-serializable con solo los campos públicos, más los
+    campos calculados (tipo_movimiento, esencial/fijo efectivos) que el dashboard
+    consume tanto para los KPIs como para la vista Movimientos — fuente única, sin
+    derivación duplicada en el cliente.
+
+    `meta` (taxonomy_meta) se pasa ya cargada desde la route para no leerla por
+    fila; si es None se carga (cacheada) acá."""
+    if meta is None:
+        meta = get_taxonomy_meta()
     out: dict[str, Any] = {}
     for f in _FIELDS:
         v = mov.get(f)
@@ -36,6 +46,16 @@ def serialize_movement(mov: dict[str, Any]) -> dict[str, Any]:
         if hasattr(v, "isoformat"):
             v = v.isoformat()
         out[f] = v
+
+    cat = (mov.get("final_category") or mov.get("suggested_category") or "").strip()
+    sub = (mov.get("final_subcategory") or mov.get("suggested_subcategory") or "").strip()
+    amount = float(mov.get("amount") or 0)
+    out["tipo_movimiento"] = derive_tipo_movimiento(cat, sub, amount, meta)
+    cat_meta = meta.get(cat) or {}
+    esencial = mov.get("esencial")
+    fijo = mov.get("fijo")
+    out["esencial_efectivo"] = bool(esencial) if esencial is not None else bool(cat_meta.get("esencial", False))
+    out["fijo_efectivo"] = bool(fijo) if fijo is not None else bool(cat_meta.get("fijo", False))
     return out
 
 

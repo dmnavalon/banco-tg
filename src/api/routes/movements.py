@@ -13,6 +13,7 @@ from ...services.exceptions import (
     ValidationError,
     VersionConflict,
 )
+from ...classifier import get_taxonomy_meta
 from ..auth import require_token
 from ..serializers import serialize_audit_event, serialize_movement
 
@@ -85,11 +86,25 @@ def _service_error_response(exc: Exception):
 # ── List + detail ────────────────────────────────────────────────────────
 
 
+def _parse_bool(raw: str | None) -> bool | None:
+    if raw is None or raw == "":
+        return None
+    return raw.strip().lower() in ("true", "1", "yes")
+
+
 @bp.get("")
 @require_token
 def list_movements():
     args = request.args
     status_filter = _parse_status_param(args.get("status"))
+    # `tipo_movimiento` y `excluido` son campos CALCULADOS por el serializer
+    # (no columnas Firestore), así que se filtran en Python tras serializar. Si
+    # vienen, subimos el fetch interno para que el cap no trunque antes de filtrar.
+    tipo_mov_raw = args.get("tipo_movimiento")
+    tipos_wanted = {t.strip() for t in (tipo_mov_raw or "").split(",") if t.strip()}
+    excluido_want = _parse_bool(args.get("excluido"))
+    user_limit = _parse_int(args.get("limit"), 100)
+    fetch_limit = 500 if (tipos_wanted or excluido_want is not None) else user_limit
     try:
         rows = db.query_movements(
             review_status=status_filter,
@@ -104,7 +119,7 @@ def list_movements():
             confidence_min=_parse_float(args.get("confidence_min")),
             description_contains=args.get("q"),
             comercio_contains=args.get("comercio"),
-            limit=_parse_int(args.get("limit"), 100),
+            limit=fetch_limit,
         )
     except gax_exceptions.FailedPrecondition as exc:
         # Combinación de filtros que exige un índice compuesto inexistente.
@@ -112,7 +127,26 @@ def list_movements():
         # vigentes viven en firestore.indexes.json (raíz) y se despliegan con
         # `firebase deploy --only firestore:indexes`.
         return jsonify({"error": "missing_index", "message": str(exc)}), 422
-    return jsonify({"items": [serialize_movement(r) for r in rows], "count": len(rows)})
+    meta = get_taxonomy_meta()
+    items = [serialize_movement(r, meta) for r in rows]
+    if tipos_wanted:
+        items = [it for it in items if it["tipo_movimiento"] in tipos_wanted]
+    if excluido_want is not None:
+        items = [it for it in items if bool(it.get("excluido")) == excluido_want]
+    if fetch_limit != user_limit:
+        items = items[:user_limit] if user_limit else items
+    return jsonify({"items": items, "count": len(items)})
+
+
+@bp.get("/export")
+@require_token
+def export_movements():
+    """Todos los movimientos no-ignorados, sin cap, para el cálculo de KPIs del
+    dashboard. Una sola lectura full-collection por carga (revalidate corto en
+    el lado Next evita martillar Firestore)."""
+    rows = db.export_movements(exclude_ignored=True)
+    meta = get_taxonomy_meta()
+    return jsonify({"items": [serialize_movement(r, meta) for r in rows], "count": len(rows)})
 
 
 @bp.get("/<mov_id>")

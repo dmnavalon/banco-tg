@@ -58,10 +58,59 @@ INTERNAL_CATEGORIES = {"Transferencias internas"}
 # y se acepta tal cual (en vez de forzarla a la primera de TAXONOMY[cat]).
 EXTENSIBLE_CATEGORIES = {"Gastos por rendir"}
 
+# ── tipo_movimiento (clasificación contable, para KPIs del dashboard) ─────────
+# El dashboard agrupa los KPIs por `tipo_movimiento` (no por el `tipo` crudo del
+# clasificador). La metadata por categoría (tipo_movimiento / esencial / fijo)
+# vive en la colección Firestore `taxonomy_meta`, seedeada desde la pestaña
+# "TaxonomíaExtendida" del GSheet (scripts/seed_taxonomy_meta.py). La derivación
+# es idéntica a la que hacía el dashboard en lib/sheets.ts antes de la migración.
+TIPO_MOVIMIENTO_VALUES = {
+    "Ingreso", "GastoReal", "MovimientoInterno", "PagoDeuda",
+    "Ahorro", "AporteInversión", "RetiroInversión", "Devolución",
+    "Impuesto", "GastoPorRendir",
+}
+
+# Overrides por subcategoría: casos donde el tipo de la categoría completa no
+# aplica. Vender un activo es traspaso inversión→caja (no ingreso nuevo); pagar
+# la tarjeta propia es traspaso entre cuentas (las compras ya se cuentan una a una).
+SUBCAT_TIPO_OVERRIDE: dict[str, str] = {
+    "Venta de activos": "RetiroInversión",
+    "Pago tarjeta de crédito": "MovimientoInterno",
+}
+
+
+def default_tipo_movimiento(categoria: str, amount: float) -> str:
+    """Default razonable cuando no hay entrada en taxonomy_meta (categoría nueva
+    creada desde el dashboard, o meta aún sin seedear)."""
+    if categoria in INCOME_CATEGORIES:
+        return "Ingreso"
+    if categoria in INTERNAL_CATEGORIES:
+        return "MovimientoInterno"
+    return "Ingreso" if (amount or 0) >= 0 else "GastoReal"
+
+
+def derive_tipo_movimiento(
+    categoria: str, subcategoria: str, amount: float, meta: dict[str, dict],
+) -> str:
+    """Cascada: override por subcategoría → meta de la categoría → default por
+    pertenencia/signo. Misma lógica que el dashboard usaba sobre el GSheet."""
+    ov = SUBCAT_TIPO_OVERRIDE.get((subcategoria or "").strip())
+    if ov:
+        return ov
+    cat_meta = meta.get((categoria or "").strip())
+    if cat_meta:
+        tm = cat_meta.get("tipo_movimiento")
+        if tm in TIPO_MOVIMIENTO_VALUES:
+            return tm
+    return default_tipo_movimiento((categoria or "").strip(), amount)
+
+
 _TAX_TTL = 60.0
 _TAX_LOCK = threading.Lock()
 _TAX_CACHE: dict[str, list[str]] | None = None
 _TAX_CACHE_AT: float = 0.0
+_META_CACHE: dict[str, dict] | None = None
+_META_CACHE_AT: float = 0.0
 
 
 def get_taxonomy() -> dict[str, list[str]]:
@@ -93,10 +142,30 @@ def get_taxonomy() -> dict[str, list[str]]:
         return merged
 
 
+def get_taxonomy_meta() -> dict[str, dict]:
+    """Metadata por categoría: {cat: {tipo_movimiento, esencial, fijo,
+    recurrente_default}}. Cachea como get_taxonomy(). Vacío si la colección no
+    está seedeada todavía — los consumidores caen al default por categoría/signo."""
+    global _META_CACHE, _META_CACHE_AT
+    now = time.time()
+    with _TAX_LOCK:
+        if _META_CACHE is not None and now - _META_CACHE_AT < _TAX_TTL:
+            return _META_CACHE
+        try:
+            meta = db.get_taxonomy_meta_docs()
+        except Exception as e:
+            log.warning(f"No pude leer taxonomy_meta ({type(e).__name__}: {e}); uso defaults.")
+            meta = {}
+        _META_CACHE = meta
+        _META_CACHE_AT = now
+        return meta
+
+
 def invalidate_taxonomy_cache() -> None:
-    global _TAX_CACHE
+    global _TAX_CACHE, _META_CACHE
     with _TAX_LOCK:
         _TAX_CACHE = None
+        _META_CACHE = None
 
 AGENT_MODEL = "claude-haiku-4-5-20251001"
 AGENT_MAX_TOKENS = 1024
