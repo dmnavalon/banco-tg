@@ -181,8 +181,7 @@ Reglas principales:
 4. Si parece ser movimiento entre cuentas propias, clasifica como Transferencias internas.
 5. Si es pago de tarjeta de crédito, clasifícalo como Transferencias internas / Pago tarjeta mismo titular.
 6. Si es una devolución de una compra TUYA (ej. "DEVOLUCION COMPRA LIDER"), clasifícala en la MISMA categoría del gasto original (una devolución de supermercado → Hogar y alimentación / Supermercado), NO en Reembolsos. Así resta del gasto real.
-7. Si es sueldo, honorarios, dividendos, intereses o arriendos recibidos, clasifícalo como Ingreso.
-7b. RENDICIONES: si es plata que te transfiere/devuelve un TERCERO por gastos que tú adelantaste por su cuenta (empresa o persona: Faind, Bodemall / Sociedad Comercial Industrial, Amplia, Papá, etc.; típicamente "Traspaso De: <nombre>"), clasifícalo como "Gastos por rendir" con el NOMBRE del tercero como subcategoría — NUNCA como Ingreso ni Reembolsos. Es plata de un tercero que pasa por tu cuenta, no es ingreso tuyo. Lo mismo para lo que tú gastas por cuenta de ellos (cargo): "Gastos por rendir" con el nombre del tercero.
+7. Si es sueldo, honorarios, dividendos, intereses o arriendos recibidos, clasifícalo como Ingreso. Los traspasos que ENTRAN desde empresas o personas ("Traspaso De: <nombre>") por defecto son INGRESO del usuario (sueldo/distribución), NO rendiciones — salvo que el usuario indique explícitamente que es una rendición. Si dudas, usa la categoría de ingreso más probable y marca requiere_revision=true para que el usuario decida.
 8. Si confianza < 0.75, entonces requiere_revision debe ser true.
 9. No uses "Otros" si existe una categoría más específica.
 10. Jardines infantiles y colegios privados de hijos clasifican como Educación / Educación Hijos. Por ejemplo "LEONCITO ESPAÑOL" es un jardín infantil de los hijos de Diego.
@@ -194,7 +193,7 @@ REGLAS CUANDO HAY PISTA DEL USUARIO (hint):
     - marca `requiere_revision: true`,
     - en `pregunta_sugerida` plantea explícitamente: «Sub-categoría nueva propuesta: "X" en "Y". ¿La uso así o prefieres mapear a [nombre cercano de la taxonomía]?» — para que el usuario pueda confirmar o redirigir.
 13. Si el usuario es ambiguo (ej. «esto es del trabajo» sin más), elige la mejor opción de la taxonomía y marca requiere_revision con una pregunta clarificatoria.
-14. "Gastos por rendir": gastos hechos con tarjeta personal que se rinden a un tercero (empresa o familiar) Y los reembolsos que ese tercero te hace. La subcategoría es el NOMBRE del tercero. Lista conocida: Bodemall (= Sociedad Comercial Industrial), Faind, Amplia, Papá, Mamá, Hermano, Hermana. Úsala cuando el tercero sea claramente identificable por la descripción (ej. "Traspaso De/A: Faind", "COMPRA ... por cuenta de X") aunque NO haya hint; si hay un nombre nuevo, úsalo tal cual como subcategoría."""
+14. EXCEPCIÓN PARA "Gastos por rendir": gastos hechos con tarjeta personal que se rinden a un tercero (empresa o familiar). La subcategoría es el NOMBRE del tercero. Lista predefinida: Bodemall, Faind, Amplia, Papá, Mamá, Hermano, Hermana. Si el usuario menciona otro nombre, úsalo tal cual. NO uses esta categoría sin un hint explícito del usuario — es DIEGO quien decide qué es rendición; ante la duda, clasifícalo como ingreso/gasto normal y deja que él lo marque como rendir si corresponde."""
 
 
 class Classification(NamedTuple):
