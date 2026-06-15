@@ -2,13 +2,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Kpi, Movimiento, PasoCalculo } from "@/lib/types";
 import { cn, formatCLP, formatMonths, formatNum, formatPct } from "@/lib/utils";
-import { X, Calendar, Filter, Download, ExternalLink } from "lucide-react";
+import { X, Calendar, Filter, Download } from "lucide-react";
 import { ConfianzaBadge, StatusBadge } from "./StatusBadge";
-
-function gsheetUrl(spreadsheetId: string): string {
-  if (!spreadsheetId) return "#";
-  return `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit`;
-}
 
 function formatPaso(p: PasoCalculo): string {
   if (p.valor === null) return "—";
@@ -27,13 +22,11 @@ export function DetalleKpiPanel({
   movimientos,
   onClose,
   contextoTitulo,
-  spreadsheetId,
 }: {
   kpi: Kpi | null;
   movimientos: Movimiento[];
   onClose: () => void;
   contextoTitulo?: string;
-  spreadsheetId: string;
 }) {
   const [pasoActivo, setPasoActivo] = useState<number | null>(null);
 
@@ -95,18 +88,6 @@ export function DetalleKpiPanel({
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-1">
-            {spreadsheetId && (
-              <a
-                href={gsheetUrl(spreadsheetId)}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                title="Abrir el Google Sheet en una pestaña nueva"
-              >
-                <ExternalLink className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">Abrir GSheet</span>
-              </a>
-            )}
             <button
               type="button"
               onClick={onClose}

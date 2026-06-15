@@ -32,7 +32,7 @@ const SECTIONS = [
 
 type SectionId = (typeof SECTIONS)[number]["id"];
 
-export function Dashboard({ kpis, data, spreadsheetId }: { kpis: DashboardKPIs; data: DashboardData; spreadsheetId: string }) {
+export function Dashboard({ kpis, data }: { kpis: DashboardKPIs; data: DashboardData }) {
   const [active, setActive] = useState<SectionId>("resumen");
   const [kpiSeleccionado, setKpiSeleccionado] = useState<{ kpi: Kpi; contexto: string } | null>(null);
 
@@ -155,7 +155,7 @@ export function Dashboard({ kpis, data, spreadsheetId }: { kpis: DashboardKPIs; 
         )}
         </div>
         <footer className="border-t border-zinc-200 py-6 text-center text-xs text-zinc-500 dark:border-zinc-800">
-          Fuente única: GSheet · {data.movimientos.length} movimientos · {data.taxonomia.length} categorías en taxonomía
+          Fuente única: Firestore · {data.movimientos.length} movimientos · {data.taxonomia.length} categorías en taxonomía
         </footer>
       </main>
 
@@ -164,7 +164,6 @@ export function Dashboard({ kpis, data, spreadsheetId }: { kpis: DashboardKPIs; 
         kpi={kpiSeleccionado?.kpi ?? null}
         movimientos={data.movimientos}
         contextoTitulo={kpiSeleccionado?.contexto}
-        spreadsheetId={spreadsheetId}
         onClose={() => setKpiSeleccionado(null)}
       />
     </div>
